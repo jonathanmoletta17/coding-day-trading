@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv
+env/
+venv/
+.pytest_cache/
+
+# Data
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+.trae/
+
+# Environment variables
+.env
+config/secrets.yaml
+
+# Logs
+*.log
+
+# Executables and binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Windows ADS artifacts copied into WSL
+*:Zone.Identifier

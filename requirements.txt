@@ -1,0 +1,17 @@
+numpy
+pandas
+yfinance
+plotly
+streamlit
+torch
+scikit-learn
+requests
+websockets
+python-dotenv
+matplotlib
+seaborn
+MetaTrader5; platform_system == "Windows"
+psycopg2-binary
+sqlalchemy
+playwright
+pytest
