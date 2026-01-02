@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""
+Pre-commit Hook: Governança Estrutural Automática
+Bloqueia commits que violam regras canônicas
+
+Instalação:
+  cp .githooks/pre-commit .git/hooks/pre-commit
+  chmod +x .git/hooks/pre-commit
+"""
+
+import sys
+import re
+from pathlib import Path
+from typing import List, Tuple
+
+# =============================================================================
+# ESTRUTURA CANÔNICA (sincronizado com PROJECT_CONTEXT.yaml)
+# =============================================================================
+
+CANONICAL_PATHS = {
+    "src/": "Produção crítica",
+    "infrastructure/": "Serviços de runtime",
+    "tests/integration/": "Testes E2E",
+    "tests/unit/": "Testes unitários",
+    "tools/diagnostics/": "Ferramentas de diagnóstico",
+    "tools/runners/": "CLI runners",
+    "tools/validation/": "Validação ocasional",
+    "experiments/": "Protótipos isolados",
+    "archive/": "Histórico preservado",
+    "ADR/": "Registros de decisão",
+}
+
+FORBIDDEN_PATHS = [
+    "scripts/",  # Deprecado - use estrutura canônica
+]
+
+# =============================================================================
+# HEADER OBRIGATÓRIO
+# =============================================================================
+
+REQUIRED_HEADER_PATTERN = re.compile(
+    r'""".*?'
+    r'@category:\s*(production|infrastructure|test|tool|experiment|archive)'
+    r'.*?'
+    r'@impact:\s*(critical|moderate|low|none)'
+    r'.*?"""',
+    re.DOTALL
+)
+
+HEADER_TEMPLATE = '''"""
+@category: {category}
+@impact: {impact}
+@description: {description}
+
+Categories:
+  production: Código crítico em src/
+  infrastructure: Serviços de runtime
+  test: Testes automatizados
+  tool: Utilitários de dev
+  experiment: Protótipos não-produção
+  archive: Histórico preservado
+
+Impact:
+  critical: Afeta decisões financeiras ou pipeline core
+  moderate: Funcionalidade secundária
+  low: Utility ou debug
+  none: Sem efeito operacional
+"""
+'''
+
+# =============================================================================
+# VALIDAÇÕES
+# =============================================================================
+
+def get_staged_python_files() -> List[Path]:
+    """Retorna arquivos .py staged para commit"""
+    import subprocess
+    
+    result = subprocess.run(
+        ['git', 'diff', '--cached', '--name-only', '--diff-filter=ACM'],
+        capture_output=True,
+        text=True
+    )
+    
+    files = result.stdout.strip().split('\n')
+    return [Path(f) for f in files if f.endswith('.py') and f]
+
+
+def validate_path(file_path: Path) -> Tuple[bool, str]:
+    """Valida se arquivo está em path canônico"""
+    path_str = str(file_path)
+    
+    # Verifica paths proibidos
+    for forbidden in FORBIDDEN_PATHS:
+        if path_str.startswith(forbidden):
+            return False, f"Path proibido: {forbidden} (deprecado - use estrutura canônica)"
+    
+    # Verifica se está em path canônico
+    for canonical in CANONICAL_PATHS.keys():
+        if path_str.startswith(canonical):
+            return True, f"OK: {CANONICAL_PATHS[canonical]}"
+    
+    # Exceções permitidas (raiz do projeto)
+    if file_path.parent == Path('.'):
+        return True, "OK: Root-level file (setup.py, etc)"
+    
+    return False, f"Path não canônico. Permitidos: {', '.join(CANONICAL_PATHS.keys())}"
+
+
+def validate_header(file_path: Path) -> Tuple[bool, str]:
+    """Valida header obrigatório"""
+    try:
+        content = file_path.read_text()
+    except Exception as e:
+        return False, f"Erro ao ler arquivo: {e}"
+    
+    # Arquivos muito pequenos (< 10 linhas) são isentos
+    if len(content.splitlines()) < 10:
+        return True, "OK: Arquivo pequeno (< 10 linhas)"
+    
+    # Verifica presença de header
+    if not REQUIRED_HEADER_PATTERN.search(content):
+        return False, (
+            "Header obrigatório ausente. Adicione no topo:\n\n"
+            + HEADER_TEMPLATE.format(
+                category="[production|infrastructure|test|tool|experiment]",
+                impact="[critical|moderate|low|none]",
+                description="Descrição breve"
+            )
+        )
+    
+    return True, "OK: Header presente"
+
+
+def validate_experiments_not_imported_in_src(file_path: Path) -> Tuple[bool, str]:
+    """Valida que src/ não importa de experiments/"""
+    if not str(file_path).startswith('src/'):
+        return True, "OK: Não é arquivo src/"
+    
+    try:
+        content = file_path.read_text()
+    except Exception:
+        return True, "OK: Erro de leitura (não bloqueia)"
+    
+    # Busca imports de experiments/
+    forbidden_imports = [
+        'from experiments',
+        'import experiments',
+    ]
+    
+    for line in content.splitlines():
+        for forbidden in forbidden_imports:
+            if forbidden in line and not line.strip().startswith('#'):
+                return False, f"VIOLAÇÃO: src/ não pode importar de experiments/ (Regra Congelada #1)"
+    
+    return True, "OK: Sem imports de experiments/"
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+def main() -> int:
+    """Executa validações e bloqueia commit se violações"""
+    print("🔒 Pre-commit: Validando governança estrutural...")
+    
+    staged_files = get_staged_python_files()
+    
+    if not staged_files:
+        print("✅ Nenhum arquivo Python staged")
+        return 0
+    
+    violations = []
+    
+    for file_path in staged_files:
+        print(f"\n📄 Validando: {file_path}")
+        
+        # Validação 1: Path canônico
+        valid, msg = validate_path(file_path)
+        if not valid:
+            violations.append((file_path, f"PATH: {msg}"))
+            print(f"  ❌ {msg}")
+        else:
+            print(f"  ✅ {msg}")
+        
+        # Validação 2: Header obrigatório
+        if file_path.exists():  # Só valida se arquivo não foi deletado
+            valid, msg = validate_header(file_path)
+            if not valid:
+                violations.append((file_path, f"HEADER: {msg}"))
+                print(f"  ❌ {msg}")
+            else:
+                print(f"  ✅ {msg}")
+            
+            # Validação 3: Imports proibidos
+            valid, msg = validate_experiments_not_imported_in_src(file_path)
+            if not valid:
+                violations.append((file_path, f"IMPORT: {msg}"))
+                print(f"  ❌ {msg}")
+            else:
+                print(f"  ✅ {msg}")
+    
+    # Resumo
+    if violations:
+        print("\n" + "="*70)
+        print("🚫 COMMIT BLOQUEADO - Violações de governança detectadas:")
+        print("="*70)
+        for file_path, error in violations:
+            print(f"\n📄 {file_path}")
+            print(f"   {error}")
+        
+        print("\n📚 Consulte:")
+        print("   - PROJECT_CONTEXT.yaml (estrutura canônica)")
+        print("   - REGRAS_CONGELADAS.md (regras imutáveis)")
+        print("   - CONTRATO_DE_EXECUCAO.md (enforcement)")
+        
+        return 1
+    
+    print("\n" + "="*70)
+    print("✅ Todas as validações passaram - commit permitido")
+    print("="*70)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
