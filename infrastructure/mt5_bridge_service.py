@@ -1,4 +1,10 @@
 """
+@category: infrastructure
+@impact: critical
+@description: Serviço de ponte API entre MT5 (Windows) e Linux/WSL
+"""
+
+"""
 MT5 Bridge Service - API Gateway para acesso ao MetaTrader 5
 Roda no Windows e expõe API REST/WebSocket para acesso do WSL/Linux
 

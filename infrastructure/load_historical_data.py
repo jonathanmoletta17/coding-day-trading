@@ -1,3 +1,9 @@
+"""
+@category: infrastructure
+@impact: moderate
+@description: Script ETL para carga inicial de histórico
+"""
+
 #!/usr/bin/env python3
 """
 Script automatizado para carga histórica inicial

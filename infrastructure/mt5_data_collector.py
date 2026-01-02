@@ -1,4 +1,10 @@
 """
+@category: infrastructure
+@impact: critical
+@description: Serviço de coleta contínua de dados MT5
+"""
+
+"""
 MT5 Data Collector - Coleta dados do MT5 via Bridge API e armazena no PostgreSQL
 Roda no WSL/Linux e se comunica com o MT5 Bridge Service no Windows
 """
