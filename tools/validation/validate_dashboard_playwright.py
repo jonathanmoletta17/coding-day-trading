@@ -1,3 +1,9 @@
+"""
+@category: tool
+@impact: low
+@description: Teste automatizado da UI do dashboard
+"""
+
 from streamlit.testing.v1 import AppTest
 
 

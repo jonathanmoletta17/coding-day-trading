@@ -1,3 +1,9 @@
+"""
+@category: experiment
+@impact: low
+@description: Teste de carga pontual
+"""
+
 import MetaTrader5 as mt5
 import time
 import os

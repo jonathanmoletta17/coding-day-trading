@@ -1,3 +1,9 @@
+"""
+@category: tool
+@impact: low
+@description: Diagnóstico: Checa conexão e login
+"""
+
 import MetaTrader5 as mt5
 import time
 import os

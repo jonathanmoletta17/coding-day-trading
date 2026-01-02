@@ -1,3 +1,9 @@
+"""
+@category: tool
+@impact: low
+@description: Diagnóstico: Valida orderbook depth
+"""
+
 import MetaTrader5 as mt5
 import time
 import pandas as pd

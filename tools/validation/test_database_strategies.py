@@ -1,4 +1,10 @@
 """
+@category: tool
+@impact: low
+@description: Validação de queries e estratégias SQL
+"""
+
+"""
 Teste de Estratégias com Dados Reais do PostgreSQL
 Valida que estratégias funcionam com dados do banco
 """

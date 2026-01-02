@@ -1,3 +1,9 @@
+"""
+@category: test
+@impact: moderate
+@description: Teste E2E crítico de toda pipeline
+"""
+
 #!/usr/bin/env python3
 """
 Script de Teste End-to-End do Sistema MT5

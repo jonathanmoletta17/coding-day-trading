@@ -1,3 +1,9 @@
+"""
+@category: tool
+@impact: low
+@description: CLI runner para processamento DSL
+"""
+
 import argparse
 import dataclasses
 import json

@@ -1,3 +1,9 @@
+"""
+@category: experiment
+@impact: low
+@description: Teste legacy de conexão Windows direto
+"""
+
 #!/usr/bin/env python3
 """
 Script para testar conexão MT5 - DEVE SER EXECUTADO NO WINDOWS

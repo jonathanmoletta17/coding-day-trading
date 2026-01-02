@@ -1,3 +1,9 @@
+"""
+@category: test
+@impact: moderate
+@description: Unittests do engine DSL v01
+"""
+
 import unittest
 from decimal import Decimal
 

@@ -1,3 +1,9 @@
+"""
+@category: experiment
+@impact: low
+@description: Exploração completa da API MT5
+"""
+
 #!/usr/bin/env python3
 """
 Exploração Completa das Capacidades do Sistema MT5

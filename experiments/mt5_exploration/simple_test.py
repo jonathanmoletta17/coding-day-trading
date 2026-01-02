@@ -1,3 +1,9 @@
+"""
+@category: experiment
+@impact: low
+@description: Teste didático inicial
+"""
+
 #!/usr/bin/env python3
 """
 Script simplificado para testar conexão MT5 - SEM EMOJIS (compatível com Windows CMD)

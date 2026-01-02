@@ -1,3 +1,9 @@
+"""
+@category: tool
+@impact: low
+@description: Diagnóstico: Valida stream de ticks
+"""
+
 import MetaTrader5 as mt5
 import time
 import pandas as pd

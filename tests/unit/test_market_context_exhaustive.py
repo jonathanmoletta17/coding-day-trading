@@ -1,3 +1,9 @@
+"""
+@category: test
+@impact: critical
+@description: Validação de propriedades do Context Classifier
+"""
+
 #!/usr/bin/env python3
 """
 Teste Exaustivo End-to-End - Market Context Classifier

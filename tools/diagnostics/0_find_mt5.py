@@ -1,3 +1,9 @@
+"""
+@category: tool
+@impact: low
+@description: Diagnóstico: Busca executável MT5
+"""
+
 import os
 import platform
 import winreg

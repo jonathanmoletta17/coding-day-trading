@@ -1,3 +1,9 @@
+"""
+@category: experiment
+@impact: low
+@description: Validação one-time de schema
+"""
+
 import time
 import numpy as np
 import pandas as pd

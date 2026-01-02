@@ -1,3 +1,9 @@
+"""
+@category: test
+@impact: moderate
+@description: Health check de infraestrutura
+"""
+
 import sys
 import os
 import logging
