@@ -251,26 +251,67 @@ coding-day-trading/
 ├── docker-compose.yml            # PostgreSQL + PgAdmin
 ├── requirements.txt              # Dependências Python
 │
-├── sql/
-│   └── schema.sql                # Schema do banco
+├── src/                    # 🟢 NÚCLEO DE PRODUÇÃO (Lógica Crítica)
+│   ├── microstructure/     # Engine de detecção de padrões e DSL
+│   ├── analysis/           # Classificadores de contexto de mercado
+│   ├── database/           # Abstração de persistência
+│   └── collectors/         # Interfaces de coleta
 │
-├── src/
-│   ├── collectors/
-│   │   └── mt5_data_collector.py # Coletor de dados
-│   ├── analysis/
-│   │  └── indicators.py         # Indicadores técnicos
-│   └── visualization/
-│       └── dashboard.py          # Dashboard (TODO)
+├── infrastructure/         # 🏗️ SERVIÇOS DE RUNTIME (Daemons)
+│   ├── mt5_bridge_service.py   # Ponte API Windows (FastAPI)
+│   ├── mt5_data_collector.py   # Loop de coleta contínua
+│   └── load_historical_data.py # ETL inicial
 │
-├── scripts/
-│   ├── mt5_bridge_service.py     # Bridge API (Windows)
-│   ├── test_mt5_simple.py        # Teste de conexão
-│   ├── test_end_to_end.py        # Teste completo
-│   └── mt5_validation/           # Scripts de validação
+├── tests/                  # 🧪 TESTES AUTOMATIZADOS (CI/CD)
+│   ├── integration/        # Testes E2E e validação de backend
+│   └── unit/               # Testes isolados de lógica core
 │
-└── docs/
-    ├── MT5_TEST_INSTRUCTIONS.md  # Instruções de test
-    └── MT5_TEST_RESULTS.md       # Resultados do teste
+├── tools/                  # 🛠️ FERRAMENTAS DE DESENVOLVIMENTO
+│   ├── diagnostics/        # Validadores de ambiente MT5 (0-3)
+│   ├── runners/            # CLI runners para processos manuais
+│   └── validation/         # Testes pontuais (SQL, UI Dashboard)
+│
+├── experiments/            # 🔬 PROTÓTIPOS E EXPLORAÇÃO
+│   ├── mt5_exploration/    # Aprendizado da API MT5
+│   └── stress_tests/       # Testes de carga não-funcionais
+│
+├── archive/                # 📦 DEPÓSITO DE CÓDIGO LEGADO (Histórico)
+├── ADR/                    # 🏛️ REGISTROS DE DECISÃO ARQUITETURAL
+└── docs/                   # Documentação detalhada
+```
+
+### Governança e Controle
+Este projeto utiliza um **Contrato de Execução** e **Hooks de Git** para garantir integridade.
+- Novos arquivos devem seguir a estrutura canônica.
+- Commits são validados automaticamente por `.githooks/pre-commit`.
+- Consulte `GOVERNANCE_INDEX.md` antes de contribuir.
+
+### Componentes Principais
+
+#### 1. MT5 Bridge Service (`infrastructure/mt5_bridge_service.py`)
+Serviço REST/WebSocket que roda no Windows e expõe a API do MetaTrader 5 para o ambiente WSL/Linux.
+- Porta: 8000
+- Endpoints: `/account`, `/ticks`, `/candles`, `/orderbook`
+
+#### 2. MT5 Data Collector (`infrastructure/mt5_data_collector.py`)
+Serviço daemon que consome a Bridge API e persiste dados no TimescaleDB.
+
+#### 3. DSL Pattern Engine (`src/microstructure/dsl_v01.py`)
+Núcleo da análise de microestrutura. Processa eventos de tick e detecta padrões de liquidez (ex: `LiquiditySweep`, `BookPressure`).
+
+---
+
+## Como Executar
+
+Consulte o [Guia de Migração](MIGRATION_GUIDE.md) para comandos atualizados.
+
+### Testes Rápidos
+```bash
+# Testes unitários (Lógica Core)
+PYTHONPATH=. python tests/unit/test_dsl_v01_unittest.py
+
+# Diagnóstico de Infraestrutura
+python tools/diagnostics/1_check_connection.py
 ```
 
 ## 🔧 Troubleshooting
