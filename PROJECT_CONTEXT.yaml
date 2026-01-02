@@ -1,0 +1,114 @@
+# Contexto Canonizado do Projeto
+# Fatos imutáveis sobre o sistema de trading
+# Não explica, não justifica - apenas declara
+
+---
+project:
+  name: "Coding Day Trading"
+  domain: "Algorithmic Trading - Microstructure Analysis"
+  risk_level: "CRITICAL_FINANCIAL"  # Pode perder capital real
+  
+environments:
+  production:
+    - name: "Windows Host + WSL2 Hybrid"
+      components:
+        - "MetaTrader 5 (Windows)"
+        - "MT5 Bridge API (FastAPI Windows)"
+        - "Collectors (WSL Linux)"
+        - "PostgreSQL/TimescaleDB (Docker)"
+      critical_services:
+        - "infrastructure/mt5_bridge_service.py"  # SPOF
+        - "infrastructure/mt5_data_collector.py"
+        - "docker-compose.yml"  # Database
+  
+  development:
+    - name: "WSL2 Linux"
+      limitations:
+        - "MetaTrader5 module unavailable (Windows-only)"
+        - "Can test core logic, not MT5 integration"
+  
+canonical_truths:
+  what_is_production:
+    - "src/microstructure/*.py - 5 arquivos core DSL engine"
+    - "src/analysis/market_context_classifier.py - Classifier validado"
+    - "src/database/db_handler.py - Persistência"
+    - "src/collectors/mt5_market_data.py - Coleta MT5"
+    - "src/collectors/crypto_market_data.py - Coleta Binance"
+    - "infrastructure/*.py - Serviços de runtime"
+  
+  what_never_is_production:
+    - "archive/* - Histórico preservado, zero operacional"
+    - "experiments/* - Isolado do crítico, não roda em prod"
+    - "tools/* - Utilities de dev/debug apenas"
+  
+  what_can_break_real_money:
+    - "Mudanças em src/microstructure/* - Pattern detection incorreto"
+    - "Mudanças em src/collectors/* - Dados incorretos"
+    - "Mudanças em infrastructure/mt5_bridge_service.py - Ponte quebrada"
+    - "Mudanças em docker-compose.yml - Perda de dados"
+  
+  what_is_experimental_by_definition:
+    - "Qualquer arquivo em experiments/"
+    - "Scripts numerados test_*.py sem uso em CI/CD"
+    - "Arquivos marcados como PoC ou prototype em docstring"
+  
+testing_hierarchy:
+  critical_tests:  # Falha destes = bloqueio de deploy
+    - "tests/integration/test_end_to_end.py"
+    - "tests/unit/test_dsl_v01_unittest.py"
+    - "tests/unit/test_market_context_exhaustive.py"
+  
+  supplementary_tests:  # Úteis mas não bloqueantes
+    - "tools/validation/test_database_strategies.py"
+    - "tools/diagnostics/*.py"
+
+dependencies:
+  windows_only:
+    - "MetaTrader5" 
+    - Reason: "API oficial é Python para Windows"
+  
+  external_services:
+    - "PostgreSQL/TimescaleDB" 
+    - "Binance WebSocket API"
+  
+  critical_libs:
+    - "pandas"
+    - "sqlalchemy"
+    - "psycopg2"
+    - "fastapi"  # Para MT5 Bridge
+
+data_flow:
+  ingestion:
+    - "MT5 Terminal → MT5 Bridge API (HTTP/WS) → Collectors → PostgreSQL"
+    - "Binance → WebSocket → BinanceCollector → PostgreSQL"
+  
+  processing:
+    - "PostgreSQL → DSL Engine → Pattern Detection → Context Classifier"
+  
+  decision:
+    - "Context Classifier → (humano decide) → Execução manual"
+  
+  # CRÍTICO: Sistema NÃO executa trades automaticamente
+  no_auto_trading: true
+
+governance:
+  decision_registry: "ADR/"  # Architecture Decision Records
+  frozen_rules: "REGRAS_CONGELADAS.md"
+  execution_contract: "CONTRATO_DE_EXECUCAO.md"
+
+current_state:
+  last_major_change: "2026-01-02 - Arquivamento de 8 arquivos zero-impact"
+  branch: "cleanup/archive-zero-impact"
+  pending_uncertainties:
+    - name: "Dashboard status"
+      affects: "6 files in src/visualization/ and src/analysis/"
+      test_needed: "streamlit run src/visualization/dashboard.py"
+      consequence: "If active → Production. If broken → Experiments"
+
+anti_patterns:
+  never_do:
+    - "Mover experiments/ para src/"
+    - "Deletar sem git mv"
+    - "Modificar src/ sem rodar testes"
+    - "Assumir imports funcionam sem testar"
+    - "Concluir com 'Dashboard status: unknown'"
