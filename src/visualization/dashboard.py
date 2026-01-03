@@ -1,9 +1,17 @@
+"""
+@category: production
+@impact: moderate
+@description: Dashboard interativo para visualização de dados de mercado e análise técnica
+"""
 import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import sys
 import os
 import time
+
+from dotenv import load_dotenv
+load_dotenv()
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
@@ -92,25 +100,25 @@ if mode == "Crypto (Binance)":
 
 elif mode == "MT5 (MetaTrader5)":
     symbol = st.sidebar.text_input("Symbol", "EURUSD").upper()
-    try:
-        import MetaTrader5 as mt5
-        from src.collectors.mt5_candles import MT5CandleCollector
-    except Exception:
-        st.error("MetaTrader5 não está disponível neste ambiente.")
-        st.stop()
+    
+    # Importação segura do coletor (já lida com ausência de MT5 lib)
+    from src.collectors.mt5_candles import MT5CandleCollector
 
+    # Definição de timeframes como STRINGS para compatibilidade híbrida
     timeframe_map = {
-        "M1": mt5.TIMEFRAME_M1,
-        "M5": mt5.TIMEFRAME_M5,
-        "M15": mt5.TIMEFRAME_M15,
-        "H1": mt5.TIMEFRAME_H1,
-        "D1": mt5.TIMEFRAME_D1,
+        "M1": "M1",
+        "M5": "M5",
+        "M15": "M15",
+        "H1": "H1",
+        "H4": "H4",
+        "D1": "D1",
     }
-    timeframe_str = st.sidebar.selectbox("Timeframe", list(timeframe_map.keys()), index=1)
+    timeframe_str = st.sidebar.selectbox("Timeframe", list(timeframe_map.keys()), index=3) # Default H1
     timeframe = timeframe_map[timeframe_str]
 
     if st.sidebar.button("Fetch Data"):
         collector = MT5CandleCollector()
+        # O coletor agora aceita STRING ("H1") e resolve internamente
         df = collector.get_historical_data(symbol, timeframe, num_candles=500)
         collector.shutdown()
 
