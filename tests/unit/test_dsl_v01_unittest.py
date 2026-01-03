@@ -143,6 +143,34 @@ class TestDSLv01(unittest.TestCase):
         derived_types = [d.envelope.event_type for d in rr.derived_events]
         self.assertIn("LIQUIDITY_REMOVE", derived_types)
 
+    def test_replay_iter_records_ordered_matches_replay_records(self):
+        events = [
+            _base_event(
+                "s1",
+                "BOOK_SNAPSHOT",
+                1,
+                {"bids": [["100", "10"], ["99", "10"]], "asks": [["101", "10"]], "depth_limit": 20},
+            ),
+            _base_event("l1", "LEVEL_SET", 2, {"side": "BID", "price": "100", "new_size": "9"}),
+            _base_event("l2", "LEVEL_SET", 3, {"side": "ASK", "price": "101", "new_size": "9"}),
+            _base_event("l3", "LEVEL_SET", 4, {"side": "BID", "price": "100", "new_size": "10"}),
+        ]
+        engine = ReplayEngineV01(tick_size_by_instrument=self.tick_sizes)
+        rr = engine.replay(events)
+        ordered = list(engine.iter_records_ordered(events))
+
+        def _key(r):
+            return (r.envelope.stream_key(), r.envelope.ordering_key(), 0 if not r.is_derived else 1, r.envelope.event_id)
+
+        rr_sorted = sorted(rr.records, key=_key)
+        ordered_sorted = sorted(ordered, key=_key)
+
+        self.assertEqual(len(rr_sorted), len(ordered_sorted))
+        for a, b in zip(rr_sorted, ordered_sorted):
+            self.assertEqual(a.envelope.event_type, b.envelope.event_type)
+            self.assertEqual(a.envelope.event_id, b.envelope.event_id)
+            self.assertEqual(a.is_derived, b.is_derived)
+
     def test_gap_requires_snapshot(self):
         events = [
             _base_event(

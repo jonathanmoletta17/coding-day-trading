@@ -1,9 +1,15 @@
+"""
+@category: production
+@impact: critical
+@description: Engine de replay de eventos de orderbook e reconstrução de estado
+"""
+
 from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from src.microstructure.book import BookStateSnapshot, OrderBook
 from src.microstructure.models import BaseEvent, DerivedEvent, EventEnvelope, EventRecord, parse_decimal, parse_int
@@ -141,6 +147,186 @@ class ReplayEngineV01:
 
         records.sort(key=lambda r: (r.envelope.stream_key(), r.envelope.ordering_key(), 0 if not r.is_derived else 1, r.envelope.event_id))
         return ReplayResult(records=records, derived_events=derived_events)
+
+    def replay_ordered(self, base_events: Sequence[BaseEvent]) -> ReplayResult:
+        self._seen_event_ids = set()
+        self._last_source_seq = {}
+
+        books: Dict[Tuple[str, str, str], OrderBook] = {}
+        records: List[EventRecord] = []
+        derived_events: List[DerivedEvent] = []
+
+        for ev in base_events:
+            env = ev.envelope
+            self._validate_idempotent(env)
+            self._validate_ordering(env)
+
+            book = books.get(env.stream_key())
+            if book is None:
+                book = OrderBook(tick_size=self._tick_size_for(env.instrument_id))
+                books[env.stream_key()] = book
+
+            pre = book.snapshot()
+            post = pre
+            derived_for_base: List[DerivedEvent] = []
+
+            if env.event_type in ("SEQUENCE_GAP", "BOOK_RESET"):
+                book.invalidate()
+                post = book.snapshot()
+            elif env.event_type == "BOOK_SNAPSHOT":
+                bids = ev.payload.get("bids", [])
+                asks = ev.payload.get("asks", [])
+                depth_limit = ev.payload.get("depth_limit")
+                if depth_limit is not None:
+                    depth_limit = parse_int(depth_limit, "depth_limit")
+                book.apply_snapshot(bids=bids, asks=asks, depth_limit=depth_limit)
+                post = book.snapshot()
+            elif env.event_type == "LEVEL_SET":
+                side = str(ev.payload["side"])
+                price = parse_decimal(ev.payload["price"], "price")
+                new_size = parse_decimal(ev.payload["new_size"], "new_size")
+                old_size = book.apply_level_set(side=side, price=price, new_size=new_size)
+                post = book.snapshot()
+
+                delta = new_size - old_size
+                if delta != 0:
+                    dtype = "LIQUIDITY_ADD" if delta > 0 else "LIQUIDITY_REMOVE"
+                    derived_for_base.append(
+                        _make_liquidity_delta(
+                            base_env=env,
+                            derived_type=dtype,
+                            side=side,
+                            price=price,
+                            old_size=old_size,
+                            new_size=new_size,
+                            delta=delta,
+                        )
+                    )
+
+                if post.depth_limit is not None:
+                    shifts = _derive_level_shift(pre=pre, post=post, depth_limit=post.depth_limit)
+                    if shifts:
+                        derived_for_base.append(_make_level_shift(base_env=env, depth_limit=post.depth_limit, shifts=shifts))
+            elif env.event_type == "TRADE_PRINT":
+                size = parse_decimal(ev.payload["size"], "size")
+                if size <= 0:
+                    raise InvariantError("TRADE_PRINT.size must be > 0")
+            else:
+                raise InvariantError(f"Unsupported event_type: {env.event_type}")
+
+            records.append(
+                EventRecord(
+                    envelope=env,
+                    payload=ev.payload,
+                    is_derived=False,
+                    parent_event_id=None,
+                    pre_state=pre,
+                    post_state=post,
+                    captures={},
+                )
+            )
+
+            if derived_for_base:
+                derived_events.extend(derived_for_base)
+                for d in derived_for_base:
+                    records.append(
+                        EventRecord(
+                            envelope=d.envelope,
+                            payload=d.payload,
+                            is_derived=True,
+                            parent_event_id=d.parent_event_id,
+                            pre_state=pre,
+                            post_state=post,
+                            captures={},
+                        )
+                    )
+
+        return ReplayResult(records=records, derived_events=derived_events)
+
+    def iter_records_ordered(self, base_events: Iterable[BaseEvent]) -> Iterator[EventRecord]:
+        self._seen_event_ids = set()
+        self._last_source_seq = {}
+
+        books: Dict[Tuple[str, str, str], OrderBook] = {}
+
+        for ev in base_events:
+            env = ev.envelope
+            self._validate_idempotent(env)
+            self._validate_ordering(env)
+
+            book = books.get(env.stream_key())
+            if book is None:
+                book = OrderBook(tick_size=self._tick_size_for(env.instrument_id))
+                books[env.stream_key()] = book
+
+            pre = book.snapshot()
+            post = pre
+            derived_for_base: List[DerivedEvent] = []
+
+            if env.event_type in ("SEQUENCE_GAP", "BOOK_RESET"):
+                book.invalidate()
+                post = book.snapshot()
+            elif env.event_type == "BOOK_SNAPSHOT":
+                bids = ev.payload.get("bids", [])
+                asks = ev.payload.get("asks", [])
+                depth_limit = ev.payload.get("depth_limit")
+                if depth_limit is not None:
+                    depth_limit = parse_int(depth_limit, "depth_limit")
+                book.apply_snapshot(bids=bids, asks=asks, depth_limit=depth_limit)
+                post = book.snapshot()
+            elif env.event_type == "LEVEL_SET":
+                side = str(ev.payload["side"])
+                price = parse_decimal(ev.payload["price"], "price")
+                new_size = parse_decimal(ev.payload["new_size"], "new_size")
+                old_size = book.apply_level_set(side=side, price=price, new_size=new_size)
+                post = book.snapshot()
+
+                delta = new_size - old_size
+                if delta != 0:
+                    dtype = "LIQUIDITY_ADD" if delta > 0 else "LIQUIDITY_REMOVE"
+                    derived_for_base.append(
+                        _make_liquidity_delta(
+                            base_env=env,
+                            derived_type=dtype,
+                            side=side,
+                            price=price,
+                            old_size=old_size,
+                            new_size=new_size,
+                            delta=delta,
+                        )
+                    )
+
+                if post.depth_limit is not None:
+                    shifts = _derive_level_shift(pre=pre, post=post, depth_limit=post.depth_limit)
+                    if shifts:
+                        derived_for_base.append(_make_level_shift(base_env=env, depth_limit=post.depth_limit, shifts=shifts))
+            elif env.event_type == "TRADE_PRINT":
+                size = parse_decimal(ev.payload["size"], "size")
+                if size <= 0:
+                    raise InvariantError("TRADE_PRINT.size must be > 0")
+            else:
+                raise InvariantError(f"Unsupported event_type: {env.event_type}")
+
+            yield EventRecord(
+                envelope=env,
+                payload=ev.payload,
+                is_derived=False,
+                parent_event_id=None,
+                pre_state=pre,
+                post_state=post,
+                captures={},
+            )
+
+            for d in derived_for_base:
+                yield EventRecord(
+                    envelope=d.envelope,
+                    payload=d.payload,
+                    is_derived=True,
+                    parent_event_id=d.parent_event_id,
+                    pre_state=pre,
+                    post_state=post,
+                    captures={},
+                )
 
 
 def _order_events_canonically(base_events: Sequence[BaseEvent]) -> List[BaseEvent]:
