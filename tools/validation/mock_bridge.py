@@ -55,7 +55,33 @@ def get_tick(symbol: str):
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "mt5_connected": True}
+    return {
+        "status": "healthy", 
+        "mt5_connected": True,
+        "terminal_build": 2980,
+        "account_login": 12345678,
+        "server": "Demo-Server"
+    }
+
+@app.get("/account")
+def get_account():
+    return {
+        "login": 12345678,
+        "server": "Demo-Server",
+        "name": "Mock User",
+        "currency": "USD",
+        "leverage": 100,
+        "balance": 10000.0,
+        "equity": 10000.0,
+        "margin": 0.0,
+        "margin_free": 10000.0,
+        "margin_level": 0.0,
+        "profit": 0.0
+    }
+
+import os
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.getenv("PORT", 8000))
+    print(f"Starting Mock Bridge on port {port}...")
+    uvicorn.run(app, host="0.0.0.0", port=port)
