@@ -5,6 +5,7 @@
 """
 
 import unittest
+import os
 from decimal import Decimal
 
 from src.microstructure.dsl_v01 import DSLParserV01, PatternEngineV01
@@ -346,6 +347,44 @@ class TestDSLv01(unittest.TestCase):
             rr.records, pattern_params=params, enabled_patterns=["ReplenishAfterDepletionSequence"]
         )
         self.assertEqual(len(occ), 1)
+
+
+class TestContextMetricsReader(unittest.TestCase):
+    def test_load_last_context_from_metrics_ok(self) -> None:
+        from src.microstructure.context_metrics import load_last_context_from_metrics
+        import tempfile
+        import json
+
+        # Create a dummy metrics file
+        dummy_data = {
+            "windows": [
+                {
+                    "window_start_ms": 1000,
+                    "window_end_ms": 2000,
+                    "context": {
+                        "do_not_operate": False,
+                        "stability": "STABLE",
+                        "liquidity": "NORMAL",
+                        "activity": "NORMAL"
+                    }
+                }
+            ]
+        }
+        
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as tmp:
+            json.dump(dummy_data, tmp)
+            tmp_path = tmp.name
+            
+        try:
+            snap = load_last_context_from_metrics(tmp_path)
+            self.assertTrue(isinstance(snap.do_not_operate, bool))
+            self.assertTrue(isinstance(snap.stability, str) and snap.stability)
+            self.assertTrue(isinstance(snap.liquidity, str) and snap.liquidity)
+            self.assertTrue(isinstance(snap.activity, str) and snap.activity)
+            self.assertTrue(isinstance(snap.window_start_ms, int))
+            self.assertTrue(isinstance(snap.window_end_ms, int))
+        finally:
+            os.unlink(tmp_path)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,31 @@
+# Streamlit Configuration - Dark Trading Theme
+
+[theme]
+# Primary color: Accent color for interactive elements
+primaryColor = "#bb86fc"
+
+# Background colors
+backgroundColor = "#0e0e0e"
+secondaryBackgroundColor = "#1a1a1a"
+
+# Text color
+textColor = "#ffffff"
+
+# Font family
+font = "sans serif"
+
+[server]
+# Run in headless mode (no browser auto-open)
+headless = true
+
+# Allow embedding in iframes
+enableCORS = false
+enableXsrfProtection = true
+
+[browser]
+# Gather usage stats
+gatherUsageStats = false
+
+[runner]
+# Faster reruns
+fastReruns = true

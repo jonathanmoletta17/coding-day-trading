@@ -50,34 +50,52 @@ def start_mock_bridge():
         print(f"❌ FALHA AO INICIAR MOCK: {e}")
         return None
 
+def get_wsl_host_ip():
+    """Detecta IP do Host Windows no WSL"""
+    try:
+        cmd = "ip route show | grep default | awk '{print $3}'"
+        return os.popen(cmd).read().strip()
+    except:
+        return None
+
 def main():
     print("="*60)
     print("🚀 CODING DAY TRADING - DASHBOARD LAUNCHER")
     print("="*60)
 
-    # 1. Verifica Bridge Real
-    bridge_active = check_bridge_connection(BRIDGE_URL)
+    # 1. Tenta Validar Conexão (Inteligente)
+    active_url = None
+    
+    # Check 1: URL do .env
+    if check_bridge_connection(BRIDGE_URL):
+        active_url = BRIDGE_URL
+    else:
+        # Check 2: Tenta descobrir IP do Host
+        host_ip = get_wsl_host_ip()
+        if host_ip and host_ip not in BRIDGE_URL:
+            dynamic_url = f"http://{host_ip}:8000"
+            print(f"[*] Tentando IP detectado ({dynamic_url})...")
+            if check_bridge_connection(dynamic_url):
+                print(f"[!] SUCESSO! Bridge encontrada em {dynamic_url} (Atualizando runtime...)")
+                active_url = dynamic_url
+                os.environ["MT5_BRIDGE_URL"] = active_url
+
     mock_proc = None
-
-    if not bridge_active:
-        print(f"\n[!] AVISO: MT5 Bridge não encontrado em {BRIDGE_URL}")
-        choice = input("[?] Deseja iniciar o MOCK BRIDGE para testes visuais? (S/n): ").strip().lower()
-        
-        if choice in ('', 's', 'y'):
-            # Sobrescreve URL para localhost se usar mock
-            os.environ["MT5_BRIDGE_URL"] = "http://localhost:8000"
-            mock_proc = start_mock_bridge()
-            if not mock_proc:
-                print("[!] Abortando devido a falha no Mock.")
-                sys.exit(1)
-        else:
-            print("[!] Prosseguindo sem Bridge (Funcionalidades MT5 podem falhar).")
-
+    if not active_url:
+        print("\n[!] AVISO: Não foi possível verificar a Bridge automaticamente.")
+        print("[*] Dashboard será iniciado mesmo assim (Modo: Launch Anyway).")
+        print("[*] Se os dados não carregarem, verifique o 'run_windows_bridge.bat' no Windows.")
+    
     # 2. Inicia Dashboard
     print(f"\n[*] Iniciando Dashboard ({DASHBOARD_SCRIPT})...")
     print("="*60)
     
-    cmd = ["streamlit", "run", DASHBOARD_SCRIPT]
+    cmd = [
+        "streamlit", "run", DASHBOARD_SCRIPT,
+        "--server.headless", "true",
+        "--server.address", "0.0.0.0",
+        "--server.port", "8501"
+    ]
     try:
         # Executa streamlit e bloqueia
         subprocess.run(cmd, check=True)
@@ -85,9 +103,7 @@ def main():
         print("\n[!] Encerrando...")
     finally:
         if mock_proc:
-            print(f"[*] Finalizando Mock Bridge (PID {mock_proc.pid})...")
             mock_proc.terminate()
-            mock_proc.wait()
 
 if __name__ == "__main__":
     main()

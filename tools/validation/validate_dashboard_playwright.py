@@ -17,13 +17,18 @@ def validate_dashboard():
     mode_radio = at.sidebar.radio[0]
     assert "Crypto (Binance)" in mode_radio.options
 
-    assert len(at.metric) == 3
-    assert at.dataframe
+    # Custom metrics are rendered via markdown
+    markdown_content = " ".join([m.value for m in at.markdown])
+    assert "Best Bid" in markdown_content
+    assert "Best Ask" in markdown_content
+    assert "Spread" in markdown_content
+
+    assert len(at.dataframe) >= 1
 
     assert at.sidebar.button
     button_labels = [b.label for b in at.sidebar.button]
-    assert "▶️ Iniciar Stream" in button_labels
-    assert "⏹️ Parar Stream" in button_labels
+    assert "📊 Order Book" in button_labels
+    assert "⏹️ Stop OB" in button_labels
 
 if __name__ == "__main__":
     validate_dashboard()

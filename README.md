@@ -50,7 +50,7 @@ Sistema completo de coleta, armazenamento e análise de dados financeiros do Met
 ### 1. **MT5 Bridge Service** (Windows)
 Serviço FastAPI que roda no Windows e expõe o MT5 via API REST/WebSocket.
 
-**Arquivo:** `scripts/mt5_bridge_service.py`
+**Arquivo:** `infrastructure/mt5_bridge_service.py`
 
 **Endpoints:**
 - `GET /health` - Status da conexão
@@ -63,7 +63,7 @@ Serviço FastAPI que roda no Windows e expõe o MT5 via API REST/WebSocket.
 ### 2. **Data Collector** (WSL/Linux)
 Coleta dados do Bridge API e armazena no PostgreSQL.
 
-**Arquivo:** `src/collectors/mt5_data_collector.py`
+**Arquivo:** `infrastructure/mt5_data_collector.py`
 
 **Modos:**
 - Carga histórica inicial
@@ -152,7 +152,7 @@ cd C:\Users\jonathan-moletta
 python test_mt5_simple.py  # Teste rápido (opcional)
 
 # Inicie o bridge service
-python mt5_bridge_service.py
+python infrastructure/mt5_bridge_service.py
 ```
 
 O serviço estará disponível em: `http://localhost:8000`
@@ -160,7 +160,7 @@ O serviço estará disponível em: `http://localhost:8000`
 ### Passo 5: Testar Sistema End-to-End (WSL)
 
 ```bash
-python scripts/test_end_to_end.py
+python tests/integration/test_end_to_end.py
 ```
 
 Este script testa:
@@ -175,7 +175,7 @@ Este script testa:
 ### Passo 6: Iniciar Coleta de Dados (WSL)
 
 ```bash
-python src/collectors/mt5_data_collector.py
+python infrastructure/mt5_data_collector.py
 ```
 
 Escolha uma opção:
@@ -225,7 +225,7 @@ python test_mt5_simple.py
 
 ### Teste End-to-End (WSL)
 ```bash
-python scripts/test_end_to_end.py
+python tests/integration/test_end_to_end.py
 ```
 
 ### Teste do Bridge API (qualquer)

@@ -1,3 +1,8 @@
+"""
+@category: production
+@impact: critical
+@description: Binance market data collector - WebSocket real-time e REST API histórico
+"""
 import asyncio
 import json
 import numpy as np
@@ -154,6 +159,71 @@ class BinanceCollector:
         except Exception as e:
             logging.error(f"Erro na conexão com Binance: {e}")
             return None
+    
+    def get_historical_klines(self, symbol: str, interval: str = "1h", limit: int = 500):
+        """
+        Obtém dados históricos de candlestick (OHLCV) via REST API.
+        Endpoint: GET /api/v3/klines
+        
+        Args:
+            symbol: Par a buscar (ex: BTCUSDT)
+            interval: Timeframe (1m, 5m, 15m, 1h, 4h, 1d, etc.)
+            limit: Quantidade de candles (max 1000)
+        
+        Returns:
+            DataFrame com colunas ['time', 'open', 'high', 'low', 'close', 'volume']
+            ou None em caso de erro
+        """
+        import pandas as pd
+        
+        # Normalização do símbolo
+        clean_symbol = symbol.upper().replace("-", "").replace("/", "")
+        if not clean_symbol.endswith("USDT") and not clean_symbol.endswith("BUSD") and not clean_symbol.endswith("BTC"):
+            clean_symbol += "USDT"
+        
+        url = f"{self.BASE_URL}/klines"
+        params = {
+            "symbol": clean_symbol,
+            "interval": interval,
+            "limit": min(limit, 1000)  # Binance limit
+        }
+        
+        try:
+            response = self.session.get(url, params=params, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Binance retorna: [timestamp, open, high, low, close, volume, close_time, ...]
+                df = pd.DataFrame(data, columns=[
+                    'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                    'close_time', 'quote_volume', 'trades', 'taker_buy_base',
+                    'taker_buy_quote', 'ignore'
+                ])
+                
+                # Seleciona e formata colunas necessárias
+                df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].copy()
+                
+                # Converte timestamp (ms) para Unix timestamp (s - inteiro)
+                df['time'] = (df['timestamp'].astype('int64') // 1000).astype(int)
+                
+                # Converte preços e volume para float
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    df[col] = df[col].astype(float)
+                
+                # Remove coluna timestamp original e reordena
+                df = df[['time', 'open', 'high', 'low', 'close', 'volume']]
+                
+                logging.info(f"Obtidos {len(df)} candles de {clean_symbol} ({interval})")
+                return df
+            else:
+                logging.error(f"Erro Binance Klines API {response.status_code}: {response.text}")
+                return None
+                
+        except Exception as e:
+            logging.error(f"Erro ao buscar klines: {e}")
+            return None
+
 
 if __name__ == "__main__":
     # Teste rápido
