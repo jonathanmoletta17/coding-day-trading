@@ -12,8 +12,8 @@ MAP={'BTCUSDT':('BTC-USDT-SWAP','BTC'),'ETHUSDT':('ETH-USDT-SWAP','ETH')}
 SYMS=tuple(s.strip().upper() for s in os.getenv('MRC_SYMBOLS','BTCUSDT,ETHUSDT').split(',') if s.strip().upper() in MAP)
 POLL=max(10,int(os.getenv('MRC_POLL_SECONDS','15'))); EQ0=float(os.getenv('MRC_PAPER_EQUITY','10000'))
 RISK=min(float(os.getenv('MRC_RISK_PCT','0.0025')),0.005); COST=float(os.getenv('MRC_ROUNDTRIP_COST','0.0006'))
-TOKEN=os.getenv('MRC_DASHBOARD_TOKEN','').strip(); DB=os.getenv('MRC_DB_PATH','/data/mrc_cloud.sqlite3')
-if not Path(DB).parent.exists(): DB='/tmp/mrc_cloud.sqlite3'
+TOKEN=os.getenv('MRC_DASHBOARD_TOKEN','').strip(); DB_PATH=os.getenv('MRC_DB_PATH','/data/mrc_cloud.sqlite3')
+if not Path(DB_PATH).parent.exists(): DB_PATH='/tmp/mrc_cloud.sqlite3'
 BASE='https://www.okx.com'; STRAT='TREND_BREAKOUT_V1'; M5=300000; M15=900000
 STOP_ATR=1.5; TARGET_R=2.0; MAX_AGE=20; MAX_CHASE=.5; MAX_HOLD=24; DAILY_LOCK=.01
 
@@ -40,7 +40,7 @@ class Plan:
     symbol:str; signal_id:str; side:str; decision:str; entry:float; stop:float; target:float; atr:float
     risk_usdt:float; qty:float; rr:float; signal_ms:int; age_min:float; chase_atr:float; reason:str; created_at:str
 
-class DB:
+class StoreDB:
     def __init__(self,p):
         Path(p).parent.mkdir(parents=True,exist_ok=True); self.c=sqlite3.connect(p,check_same_thread=False); self.c.row_factory=sqlite3.Row
         self.c.execute('PRAGMA journal_mode=WAL'); self.c.execute('PRAGMA synchronous=FULL'); self.c.executescript('''
@@ -69,7 +69,7 @@ class DB:
     def metrics(self):
         xs=[f(x['r_net']) for x in self.c.execute("SELECT r_net FROM tb_trades WHERE outcome!='OPEN'").fetchall()]; n=len(xs);pos=sum(x for x in xs if x>0);neg=-sum(x for x in xs if x<0);eq=self.eq()
         return {'equity':round(eq,2),'trades':n,'expectancy_r':round(sum(xs)/n,4) if n else 0,'win_rate':round(sum(x>0 for x in xs)/n,4) if n else 0,'pf':round(pos/neg,3) if neg else None,'day_pnl':round(self.day(),2),'net_pnl':round(eq-EQ0,2)}
-db=DB(DB)
+db=StoreDB(DB_PATH)
 
 class OKX:
     def __init__(self):self.h=httpx.AsyncClient(timeout=12,headers={'User-Agent':'MRC-TrendBreakout/1.0'})
