@@ -1,0 +1,17 @@
+name: MRC CI Probe
+
+on:
+  push:
+    branches:
+      - "mrc/research-engine-v0.1"
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe runner
+        run: |
+          echo "MRC runner OK"
+          uname -a
+          python --version
