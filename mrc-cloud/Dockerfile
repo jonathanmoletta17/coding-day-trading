@@ -5,6 +5,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 COPY trend_v1.py .
+COPY slow_v1.py .
 COPY research_v1.py .
 COPY combined_app.py .
 RUN mkdir -p /data
