@@ -1,6 +1,8 @@
 # SLOW_TREND_BREAKOUT_V1 — OKX Demo Execution Runbook
 
-Status: **D3 VALIDATED / D4 IN PROGRESS / DEMO ONLY**. Real-money execution remains hard-blocked.
+Status: **D0–D4 VALIDATED / FORWARD PAPER ACTIVE / R0 BLOCKED**.
+
+Real-money execution remains hard-blocked. D3/D4 validates Demo execution plumbing; it is not authorization to risk production capital.
 
 ## Current validated baseline
 
@@ -9,13 +11,15 @@ Status: **D3 VALIDATED / D4 IN PROGRESS / DEMO ONLY**. Real-money execution rema
 - Risk per PAPER trade: 0.25%
 - Daily realized loss lock: 1% of initial PAPER equity
 - One global open position
-- Persistent state: SQLite under `/data`
-- Causal exit replay: confirmed 1m bars with paginated OKX history up to the 72h max-hold deadline
+- Persistent state: durable SQLite under `/data`
+- Causal exit replay: confirmed 1m bars with paginated OKX history through the 72h max-hold deadline
 - Same-1m stop+target ambiguity: STOP wins
-- Deadline-straddling 1m bar: STOP remains conservative; TARGET cannot win after the 72h deadline
-- Official PAPER cost baseline: 6 bps round trip
-- Operational cost stress scenarios: 10 bps and 15 bps
-- Real-money adapter gate: permanently blocked in `slow_execution_adapter_v1.py`
+- Deadline-straddling 1m bar: STOP conservative; no post-deadline TARGET
+- Official PAPER transaction-cost baseline: 6 bps round trip
+- Analytical stress cases: 10 bps and 15 bps
+- Observed first Demo calibration: 10.01 bps total round-trip cost
+- Active PAPER release: `132f3e939c8074dff084f4e56049754f9030af6f`
+- Real-money adapter gate: hard blocked
 
 ## Credential policy
 
@@ -27,247 +31,273 @@ Credentials must exist only as protected Railway service variables:
 - `OKX_DEMO_SECRET_KEY`
 - `OKX_DEMO_PASSPHRASE`
 
-Never paste credentials into ChatGPT, GitHub, source code, issues, logs, documentation, screenshots or test fixtures.
+Never place credentials in source code, GitHub, issues, documentation, screenshots, logs, tests or chat messages.
 
-Production API credentials are explicitly outside the current scope.
+Production API credentials remain outside the current scope.
 
-## Gate sequence
+## Validated gate sequence
 
-### Gate D0 — unauthenticated code/tests — PASS
+### D0 — offline/code safety — PASS
 
-Required and validated:
+Validated:
 
-- core/replay test suite PASS
-- restart-with-open-position test PASS
-- demo adapter fail-closed test PASS
-- causal replay safeguards PASS
-- production-money route blocked
+- engine/replay tests
+- restart replay tests
+- Demo adapter tests
+- fail-closed diagnostics
+- causal replay safeguards
+- production-money hard block
 
-### Gate D1 — authenticated Demo diagnostics, READ ONLY — PASS
+### D1 — authenticated Demo read-only — PASS
 
-Validated Demo state:
+Validated:
 
 - `x-simulated-trading: 1`
-- `acctLv=2` Futures mode
+- Futures `acctLv=2`
 - `net_mode`
 - read + trade permission
 - private BTC/ETH SWAP visibility
-- live linear USDT-settled instruments
-- contract metadata captured
-- cross leverage readable and observed at 3x
-- zero target positions and zero pending target orders before execution testing
+- live linear USDT-settled contract metadata
+- 3x cross leverage readability
+- initial flat target account
 
-No order is allowed at D1.
+### D2 — no-order dry run — PASS
 
-### Gate D2 — conversion + payload dry run — PASS
+Validated:
 
-Fail-closed checks include:
-
-- target instrument live/private available
-- supported linear contract
-- safe `ctVal` / base-quantity mapping
-- valid `minSz` and `lotSz`
-- verified account/position mode
-- leverage state explicitly observed
-- deterministic `clOrdId`
-- target account flat
-- no pending target order
+- instrument availability/state
+- contract conversion/minimum/lot sizing
+- account and position mode
+- leverage policy
+- deterministic client order IDs
+- zero target exposure/pending
 - notional cap
-- real-money route blocked
+- exchange max-size
+- Demo balance presence
+- no private POST
+- real-money blocked
 
-The final minimum D3 BTC size was `0.01` contracts, approximately US$7.65 notional at the test price.
+### Safe expired-POST transport probe — PASS
 
-No order is submitted at D2.
+A deliberately expired `POST /api/v5/trade/order` returned OKX item code `50036` and created no order, fill or position.
 
-### Safe POST transport probe — PASS
+This proved authenticated Demo POST routing and server-side `expTime` handling before any live Demo execution.
 
-Before D3, `POST /api/v5/trade/order` was authenticated using a deliberately expired `expTime`.
-
-Expected/observed behavior:
-
-- OKX received/authenticated the Demo POST
-- request rejected with expiry code `50036`
-- no live order created
-- no fill
-- no position
-- no pending order
-
-This proves POST transport/authentication while preserving zero exposure.
-
-### Gate D3 — first Demo Trading round-trip — PASS
+### D3 — minimum Demo market round-trip — PASS
 
 Validated attempt: `D3BTC260917B`.
 
-Controls:
+- opened `0.01` BTC-USDT-SWAP contracts at `76514.8`
+- confirmed exchange position `0.01`
+- closed with `reduceOnly` at `76514.7`
+- independently reconciled both orders and fills
+- final position `0`
+- final pending `0`
+- emergency SAFE cleanup not required
+- observed total cost about `10.01 bps`
+- all locks restored immediately
 
-- `mode=DEMO`
-- explicit one-shot arm token
-- kill switch temporarily OFF only for the armed run
-- diagnostic-only temporarily OFF only for the armed run
-- Demo credentials present
-- verified Futures/net mode
-- verified BTC metadata
-- 3x cross leverage observed; leverage was not mutated
-- deterministic client order IDs
-- expiring order requests
-- query/reconciliation logic
-- `x-simulated-trading: 1`
+The 10.01 bps observation is calibration only. It does not overwrite the frozen 6 bps PAPER baseline.
 
-Observed lifecycle:
+### D4 — Demo lifecycle/fault/restart validation — PASS
 
-1. Open `0.01` BTC-USDT-SWAP contracts at average `76514.8`.
-2. Confirm exchange position became `0.01`.
-3. Submit `reduceOnly` close for `0.01`.
-4. Close filled at average `76514.7`.
-5. Reconcile final position to exactly `0`.
-6. Independently retrieve both orders and both fills from OKX Demo history.
-7. Emergency SAFE cleanup was not required.
-8. Restore all safety locks immediately.
-9. Run D2 again and prove flat/zero-pending state.
+#### D4.1 / D4.5 — idempotency + ambiguous ACK
 
-Observed total Demo round-trip transaction cost was about `10.01 bps` on the tiny test notional. This is calibration evidence only and does not change the V1 6 bps research baseline.
+Validated with a tiny deeply non-marketable limit order:
 
-## Gate D4 — Demo lifecycle and fault validation — CURRENT GATE
+- submission treated as ambiguous at the local state-machine boundary
+- exchange queried by deterministic `clOrdId`
+- existing order discovered
+- `retry_allowed=false`
+- no duplicate opening order
+- order canceled
+- final flat
 
-D4 must be completed before any discussion of a broader Demo executor and long before R0.
+#### D4.2 — cancel by exchange `ordId`
 
-Every D4 scenario must start from and return to:
+PASS. Deep resting order was acknowledged, remained unfilled, canceled by `ordId`, and disappeared with position still zero.
 
-- BTC/ETH target position = 0
-- target pending orders = 0
-- Demo-only credentials
-- minimum practical test size
-- bounded notional
-- deterministic unique test ID
-- final independent reconciliation
+#### D4.3 — cancel by `clOrdId`
 
-### D4.1 — duplicate/idempotency behavior
+PASS. A distinct deep resting order was canceled using its deterministic client order ID; final position/pending `0/0`.
 
-Validate both layers:
+#### D4.4 — rejected order
 
-1. Local layer must refuse a second submission for an already-resolved deterministic intent.
-2. Exchange layer must be queried by `clOrdId` before any retry after an ambiguous result.
+PASS. Deliberately expired `expTime` produced `sCode=50036`; no order history/fill evidence and no exposure.
 
-Do not intentionally create duplicate market exposure merely to test exchange rejection. Prefer a resting/cancelable order or a deliberately non-executable probe where possible.
+#### D4.6 — kill switch recovery semantics
 
-### D4.2 — resting order + cancel by `ordId`
+PASS in actual restart tests:
 
-Use a tiny Demo limit order far enough from market to remain resting.
+- new opening execution disabled before recovery container
+- kill switch active
+- diagnostic-only active
+- exchange reads/reconciliation still available
+- pending-order cancellation permitted
+- `reduceOnly` risk-reducing flatten permitted
+- no opening submission from recovery process
 
-Required proof:
+#### D4.7 — restart with resting exchange order
 
-- order acknowledged
-- appears in pending orders
-- cancel request by exchange `ordId` acknowledged
-- final order state canceled
-- pending order disappears
-- no fill / no position
+PASS, attempt `D4BTC260917R`.
 
-### D4.3 — resting order + cancel by `clOrdId`
+Stage 1:
 
-Repeat with a distinct tiny resting order and cancel using deterministic `clOrdId`.
+- created one deep resting order (`0.01` contracts)
+- confirmed pending=1 and position=0
 
-Required final state remains flat with no pending order.
+Stage 2, new Railway process under safe locks:
 
-### D4.4 — rejected order behavior
+- discovered existing order by deterministic `clOrdId`
+- `opening_post_performed=false`
+- canceled existing order
+- final pending=0
+- final position=0
 
-Use a request that is safely invalid and cannot create exposure, such as:
+#### D4.8 — restart with existing exchange position
 
-- deliberately expired `expTime`, or
-- quantity below exchange minimum where deterministic rejection is verified.
+PASS, attempt `D4BTC260917P`.
 
-Required:
+Stage 1:
 
-- error captured structurally
-- no retry storm
-- no local position creation
-- reconciliation confirms no exchange-side order/position
+- minimum market open `0.01` BTC-SWAP
+- fill `76643.8`
+- position confirmed `0.01`
 
-### D4.5 — ambiguous network timeout / query-before-retry
+Stage 2, new process under safe locks:
 
-Test the local state machine without creating uncontrolled exposure.
+- discovered exchange position independently of prior process memory
+- proved ownership using the filled OPEN order in exchange history
+- performed no opening POST
+- sent only a `reduceOnly` close
+- close fill `76679.4`
+- final position=0
+- final pending=0
 
-Required behavior after a simulated/forced ambiguous client timeout:
+#### D4.9 — partial-fill state handling
 
-1. mark submission result UNKNOWN, never FAILED-by-assumption;
-2. query OKX by deterministic `clOrdId`;
-3. if found, reconcile it and never resubmit;
-4. if absent after bounded reconciliation, only then allow a controlled retry according to policy;
-5. final state independently checked.
+PASS through deterministic state-machine tests without artificially increasing live order size.
 
-### D4.6 — kill switch
+Covered:
 
-When kill switch is active:
+- live/unfilled
+- partial fill
+- live snapshot with nonzero accumulated fill
+- filled terminal state
+- canceled-after-partial
+- exact remaining quantity
+- remote order always blocks blind duplicate opening retry
+- ambiguous result requires bounded query/reconciliation
+- invalid/inconsistent fill states fail closed
 
-- new opening submissions are blocked before POST;
-- reconciliation/read operations remain available;
-- reduce-only emergency flattening policy remains separately controlled;
-- no production path can be enabled.
+Test marker:
 
-### D4.7 — restart reconciliation with resting exchange order
+`D4_ORDER_STATE_TEST=PASS partial_fill=true idempotency=true invalid_states_fail_closed=true`
 
-Preferred first restart test because it avoids intentionally carrying market exposure.
+An organic Demo partial fill may be retained as supplemental evidence if it occurs naturally. Do not manufacture one by materially increasing size.
 
-Procedure:
+## Final D4 independent reconciliation requirement — PASS
 
-1. create tiny non-marketable Demo limit order;
-2. confirm it is pending;
-3. restart the reconciliation process/service;
-4. process must discover the existing order from exchange state rather than submit another order;
-5. cancel/reconcile it;
-6. prove final pending=0 and position=0.
+After all D4 execution flags were disabled, a separate read-only process must and did verify:
 
-### D4.8 — restart reconciliation with exchange position
+- position=0
+- pending=0
+- leverage=3x
+- kill switch active
+- diagnostic-only active
+- opening disabled
+- D4 arm empty
+- all expected canceled resting orders present in exchange history as canceled
+- expired request absent from order/fill history
+- restart position OPEN/CLOSE both present as filled with fills
+- no private POST during final audit
+- real-money execution false
 
-Only after D4.7 is proven.
+This final read-only audit is the authority for D4 completion.
 
-If performed, exposure must be minimum-size Demo only, with an independent emergency flatten path prepared before opening.
+## Post-D4 operating mode
 
-Required:
+Default runtime state after any armed Demo test:
 
-- open tiny Demo position;
-- restart local executor/reconciler;
-- restarted process discovers the existing exchange position;
-- no duplicate opening order;
-- explicit reduce-only flatten;
-- final independent flat-state proof.
+- `MRC_EXECUTION_MODE=DEMO`
+- `MRC_DEMO_EXECUTION_ENABLED=0`
+- `MRC_KILL_SWITCH=1`
+- `MRC_DEMO_DIAGNOSTIC_ONLY=1`
+- D3/D4 arm tokens empty
+- no target exchange position
+- no target pending orders
 
-### D4.9 — partial-fill handling
+Do not leave an armed executor running as a service.
 
-Partial fills are timing/liquidity dependent and must not be manufactured by unsafe market manipulation.
+## PAPER release and cost calibration
 
-Two valid evidence paths:
+Active PAPER sidecar is pinned to:
 
-- deterministic unit/integration tests covering partial-fill state transitions; and
-- an organically observed Demo partial fill, if one occurs during bounded resting-order tests.
+`132f3e939c8074dff084f4e56049754f9030af6f`
 
-Do not increase order size materially just to force a partial fill.
+Required endpoints:
 
-## Forward PAPER evidence requirement
+- `/readyz`
+- `/api/audit`
+- `/api/cost-sensitivity`
 
-D3/D4 validates execution plumbing, not economic edge.
+The cost audit must keep these roles distinct:
 
-The strategy must continue prospective PAPER collection with:
+- 6 bps = frozen PAPER baseline
+- 10 bps = stress scenario
+- 15 bps = stress scenario
+- 10.01 bps = observed D3 Demo calibration metadata
 
-- original 6 bps baseline retained
-- 10 bps and 15 bps sensitivity reported analytically
-- realized/observed Demo costs tracked separately
-- no parameter retuning from one or a small number of Demo executions
-- no promotion based solely on historical backtest or execution connectivity
+Cost stress calculations must remain non-mutating: they do not alter signals, position management or persisted baseline trade results.
 
-## Gate R0 — real money — BLOCKED
+## Current gate after D4 — prospective economic evidence
 
-No promotion to real money based solely on successful Demo execution.
+The next milestone is **not** another order-connectivity gate.
 
-A separate human decision, prospective economic evidence, production-specific operational controls, production credential isolation and a new risk review would all be required before R0 could even be considered.
+Continue untouched forward PAPER/OOS collection and accumulate enough actual candidate signals and closed PAPER trades to evaluate:
+
+- prospective expectancy net R
+- win rate
+- profit factor
+- max drawdown in R and currency
+- average cost R
+- gross vs net R
+- 6/10/15 bps sensitivity
+- regime dependence
+- difference between modeled PAPER costs and observed Demo execution costs
+
+Do not retune V1 based on a handful of signals or Demo fills.
+
+## R0 — real money — BLOCKED
+
+D0–D4 PASS does **not** authorize R0.
+
+Before R0 can even be considered, require a separate explicit human decision plus, at minimum:
+
+- sufficient prospective PAPER/OOS economic evidence
+- production-specific execution/slippage study
+- production credential isolation
+- production account-mode/instrument verification
+- independent capital/risk budget
+- hard daily/position/order limits
+- restart/reconciliation controls carried into the production adapter
+- monitoring/alerting and incident procedure
+- emergency flatten/revoke-key procedure
+- audit log/immutable intent IDs
+- fresh production-only risk review
+
+Until then:
+
+**REAL MONEY = HARD BLOCKED.**
 
 ## Credential and safety hygiene
 
 - Never print secrets.
-- Never expose authenticated diagnostic endpoints publicly.
-- Use Railway protected variables.
+- Never expose authenticated diagnostics publicly.
+- Use protected Railway variables.
 - Rotate any credential accidentally exposed.
-- Keep Demo and production keys completely separate.
-- Keep execution flags disabled except during a single explicitly armed Demo test.
-- Restore kill switch immediately after each armed scenario.
+- Keep Demo and production credentials completely separate.
+- Arm Demo execution only for one named attempt at a time.
+- Restore kill switch immediately after every attempt.
 - Independently reconcile exchange state after every execution/fault test.
+- Prefer risk-reducing recovery actions under kill switch; never treat a local timeout as proof an exchange order failed.
