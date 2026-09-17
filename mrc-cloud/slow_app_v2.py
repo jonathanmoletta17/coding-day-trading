@@ -1,18 +1,19 @@
 from __future__ import annotations
-import asyncio, json, os, sqlite3, time
+import asyncio, json, os, time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 import httpx
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, HTMLResponse
 import slow_engine_v2 as eng
+from slow_store_v3 import Store
 
 SYMBOLS=("BTCUSDT","ETHUSDT")
 INST={"BTCUSDT":"BTC-USDT-SWAP","ETHUSDT":"ETH-USDT-SWAP"}
 BASE="https://www.okx.com"
 POLL=max(10,int(os.getenv("MRC_POLL_SECONDS","15")))
 DB_PATH=os.getenv("MRC_STAGING_DB","/tmp/mrc_slow_staging.sqlite3")
+DATABASE_URL=os.getenv("DATABASE_URL","").strip()
 START_EQUITY=float(os.getenv("MRC_PAPER_EQUITY","10000"))
 RISK_PCT=float(os.getenv("MRC_RISK_PCT","0.0025"))
 COST=float(os.getenv("MRC_ROUNDTRIP_COST","0.0006"))
@@ -21,65 +22,25 @@ def iso(ms=None):
     if ms is None: return datetime.now(timezone.utc).isoformat()
     return datetime.fromtimestamp(ms/1000,tz=timezone.utc).isoformat()
 
-class Store:
-    def __init__(self,path):
-        Path(path).parent.mkdir(parents=True,exist_ok=True)
-        self.c=sqlite3.connect(path,check_same_thread=False)
-        self.c.row_factory=sqlite3.Row
-        self.c.execute("PRAGMA journal_mode=WAL")
-        self.c.executescript("""
-        CREATE TABLE IF NOT EXISTS runtime_state(k TEXT PRIMARY KEY,v TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS signals(
-          signal_id TEXT PRIMARY KEY,symbol TEXT,side TEXT,decision TEXT,
-          signal_ms INTEGER,payload TEXT,created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS trades(
-          trade_id TEXT PRIMARY KEY,signal_id TEXT,symbol TEXT,side TEXT,
-          entry REAL,stop REAL,target REAL,qty REAL,risk REAL,opened_ms INTEGER,
-          last_check_ms INTEGER,closed_ms INTEGER,exit REAL,outcome TEXT,
-          pnl REAL,r_net REAL
-        );
-        """); self.c.commit()
-    def get(self,k):
-        r=self.c.execute("SELECT v FROM runtime_state WHERE k=?",(k,)).fetchone()
-        return r["v"] if r else None
-    def set(self,k,v):
-        self.c.execute("INSERT INTO runtime_state(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",(k,str(v))); self.c.commit()
-    def open_trade(self):
-        r=self.c.execute("SELECT * FROM trades WHERE outcome='OPEN' ORDER BY opened_ms LIMIT 1").fetchone()
-        return dict(r) if r else None
-    def record_signal(self,p):
-        cur=self.c.execute("INSERT OR IGNORE INTO signals VALUES(?,?,?,?,?,?,?)",
-            (p.signal_id,p.symbol,p.side,p.decision,p.signal_ms,json.dumps(p.__dict__),iso()))
-        self.c.commit(); return cur.rowcount==1
-    def open(self,p,now_ms):
-        if self.open_trade(): return False
-        cur=self.c.execute("""INSERT OR IGNORE INTO trades(
-          trade_id,signal_id,symbol,side,entry,stop,target,qty,risk,opened_ms,last_check_ms,outcome,pnl,r_net
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,0)""",
-          ("slow_"+p.signal_id,p.signal_id,p.symbol,p.side,p.entry,p.stop,p.target,p.qty,p.risk_usdt,now_ms,now_ms,"OPEN"))
-        self.c.commit(); return cur.rowcount==1
-    def mark_checked(self,trade_id,ms):
-        self.c.execute("UPDATE trades SET last_check_ms=? WHERE trade_id=?",(ms,trade_id)); self.c.commit()
-    def close(self,t,px,outcome,closed_ms):
-        sg=1 if t["side"]=="LONG" else -1
-        gross=(px-t["entry"])*sg*t["qty"]
-        fees=(t["entry"]+px)*t["qty"]*(COST/2)
-        pnl=gross-fees; r=pnl/t["risk"] if t["risk"] else 0
-        self.c.execute("""UPDATE trades SET closed_ms=?,exit=?,outcome=?,pnl=?,r_net=?,last_check_ms=?
-                          WHERE trade_id=?""",(closed_ms,px,outcome,pnl,r,closed_ms,t["trade_id"]))
-        self.c.commit()
-    def equity(self):
-        r=self.c.execute("SELECT COALESCE(SUM(pnl),0) z FROM trades WHERE outcome!='OPEN'").fetchone()
-        return START_EQUITY+float(r["z"] or 0)
-    def recent(self,n=20):
-        return [dict(r) for r in self.c.execute("SELECT * FROM trades ORDER BY COALESCE(closed_ms,opened_ms) DESC LIMIT ?",(n,)).fetchall()]
+db=Store(DB_PATH,DATABASE_URL)
 
-db=Store(DB_PATH)
+def persisted_ms(key):
+    raw=db.get(key)
+    try:return int(raw) if raw is not None else None
+    except Exception:return None
+
+def load_telemetry():
+    return {
+        "last_processed_close":{s:persisted_ms("telemetry:last_processed_close:"+s) for s in SYMBOLS},
+        "processed_close_count":{s:db.get_int("telemetry:processed_close_count:"+s,0) for s in SYMBOLS},
+        "last_decision_at":{s:db.get("telemetry:last_decision_at:"+s) for s in SYMBOLS},
+        "signals_created":db.signal_count(),
+        "paper_positions_opened":db.trade_count(),
+    }
 
 class OKX:
     def __init__(self):
-        self.h=httpx.AsyncClient(timeout=12,headers={"User-Agent":"MRC-Slow-Staging/2.0"})
+        self.h=httpx.AsyncClient(timeout=12,headers={"User-Agent":"MRC-Slow-Staging/3.0"})
     async def g(self,path,**params):
         r=await self.h.get(BASE+path,params=params); r.raise_for_status()
         j=r.json()
@@ -108,14 +69,9 @@ def one_minute(rows,cutoff):
 
 STATE={
     "started_at":iso(),"heartbeat":0.0,"symbols":{},"last_error":None,"strategy":eng.STRATEGY,
-    "mode":"PAPER_STAGING","version":"slow-staging-v2","coverage_gap":None,
-    "telemetry":{
-        "last_processed_close":{s:None for s in SYMBOLS},
-        "processed_close_count":{s:0 for s in SYMBOLS},
-        "last_decision_at":{s:None for s in SYMBOLS},
-        "signals_created":0,
-        "paper_positions_opened":0,
-    },
+    "mode":"PAPER_STAGING","version":"slow-staging-v3-storage","coverage_gap":None,
+    "storage":{"backend":db.backend,"durable":db.backend=="postgres","sqlite_path":DB_PATH if db.backend=="sqlite" else None},
+    "telemetry":load_telemetry(),
 }
 LOCK=asyncio.Lock(); TASK=None
 
@@ -135,7 +91,7 @@ async def manage_open(client,now_ms):
     STATE["coverage_gap"]=None
     ex=eng.exit_from_1m(t,rows,now_ms)
     if ex:
-        outcome,px,closed_ms=ex; db.close(t,px,outcome,closed_ms)
+        outcome,px,closed_ms=ex; db.close(t,px,outcome,closed_ms,COST)
     else:
         db.mark_checked(t["trade_id"],rows[-1]["ct"])
 
@@ -157,22 +113,28 @@ async def loop():
                     key="last_processed_1h_close:"+s
                     raw=db.get(key); last=int(raw) if raw is not None else None
                     process,newmark=eng.should_process(last,current_close,fresh_boot)
-                    ctx,p=eng.evaluate(s,h1,h4,bid,ask,now_ms,db.equity(),RISK_PCT,slot_open=slot,daily_locked=False)
+                    ctx,p=eng.evaluate(s,h1,h4,bid,ask,now_ms,db.equity(START_EQUITY),RISK_PCT,slot_open=slot,daily_locked=False)
                     action="WATERMARK_ONLY"
                     if current_close:
                         db.set(key,newmark)
                     if process:
                         tel=STATE["telemetry"]
+                        decision_at=iso(now_ms)
+                        count=db.get_int("telemetry:processed_close_count:"+s,0)+1
+                        db.set("telemetry:last_processed_close:"+s,int(newmark))
+                        db.set("telemetry:processed_close_count:"+s,count)
+                        db.set("telemetry:last_decision_at:"+s,decision_at)
                         tel["last_processed_close"][s]=int(newmark)
-                        tel["processed_close_count"][s]+=1
-                        tel["last_decision_at"][s]=iso(now_ms)
+                        tel["processed_close_count"][s]=count
+                        tel["last_decision_at"][s]=decision_at
                         if p:
-                            created=db.record_signal(p)
-                            if created: tel["signals_created"]+=1
+                            db.record_signal(p,iso())
+                            tel["signals_created"]=db.signal_count()
                             action=p.decision
                             if p.decision in ("LONG","SHORT") and not slot and not STATE["coverage_gap"]:
                                 if db.open(p,now_ms):
-                                    slot=True; action="PAPER_OPEN"; tel["paper_positions_opened"]+=1
+                                    slot=True; action="PAPER_OPEN"
+                                    tel["paper_positions_opened"]=db.trade_count()
                     async with LOCK:
                         STATE["symbols"][s]={"context":ctx,"candidate":p.__dict__ if p else None,
                                              "watermark":newmark if current_close else None,
@@ -184,7 +146,9 @@ async def loop():
             fresh_boot=False
             async with LOCK:
                 STATE["heartbeat"]=time.time(); STATE["last_error"]=" | ".join(errors) if errors else None
-                STATE["position"]=db.open_trade(); STATE["equity"]=round(db.equity(),2); STATE["recent_trades"]=db.recent()
+                STATE["position"]=db.open_trade(); STATE["equity"]=round(db.equity(START_EQUITY),2); STATE["recent_trades"]=db.recent()
+                STATE["telemetry"]["signals_created"]=db.signal_count()
+                STATE["telemetry"]["paper_positions_opened"]=db.trade_count()
             await asyncio.sleep(POLL)
     finally:
         await client.close()
@@ -195,8 +159,9 @@ async def life(app):
     TASK=asyncio.create_task(loop())
     yield
     TASK.cancel()
+    db.close_conn()
 
-app=FastAPI(title="MRC Slow Trend Staging",version="2.1",lifespan=life)
+app=FastAPI(title="MRC Slow Trend Staging",version="3.0",lifespan=life)
 
 def checks():
     return {s:bool(STATE["symbols"].get(s,{}).get("context",{}).get("ready") and not STATE["symbols"].get(s,{}).get("error")) for s in SYMBOLS}
@@ -208,14 +173,15 @@ async def health():
     ok=bool(process_ok and ck and all(ck.values()) and not STATE.get("coverage_gap"))
     return JSONResponse({"ok":ok,"feed_ready":bool(ck and all(ck.values())),"checks":ck,
                          "coverage_gap":STATE.get("coverage_gap"),"heartbeat_age_s":round(age,1),
-                         "strategy":eng.STRATEGY,"last_error":STATE.get("last_error")},
+                         "strategy":eng.STRATEGY,"storage_backend":db.backend,"last_error":STATE.get("last_error")},
                         status_code=200 if ok else 503)
 
 @app.get("/readyz")
 async def ready():
     ck=checks(); ok=bool(ck and all(ck.values()) and not STATE.get("coverage_gap"))
     return JSONResponse({"ready":ok,"checks":ck,"coverage_gap":STATE.get("coverage_gap"),
-                         "strategy":eng.STRATEGY,"mode":"PAPER_STAGING"},
+                         "strategy":eng.STRATEGY,"mode":"PAPER_STAGING","storage_backend":db.backend,
+                         "durable_storage":db.backend=="postgres"},
                         status_code=200 if ok else 503)
 
 @app.get("/api/state")
