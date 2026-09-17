@@ -5,6 +5,8 @@ engine_path=Path(__file__).with_name('slow_engine_v2.py')
 spec=importlib.util.spec_from_file_location('e',engine_path);m=importlib.util.module_from_spec(spec);sys.modules['e']=m;spec.loader.exec_module(m)
 store_path=Path(__file__).with_name('slow_store_v3.py')
 spec2=importlib.util.spec_from_file_location('s',store_path);s=importlib.util.module_from_spec(spec2);sys.modules['s']=s;spec2.loader.exec_module(s)
+replay_path=Path(__file__).with_name('slow_replay_v1.py')
+spec3=importlib.util.spec_from_file_location('rp',replay_path);rp=importlib.util.module_from_spec(spec3);sys.modules['rp']=rp;spec3.loader.exec_module(rp)
 def row(ot,o,h,l,c,q='1'):return [str(ot),str(o),str(h),str(l),str(c),'1','1','1',q]
 now=1_800_000_000_000;H=m.HOUR;F=m.FOUR_HOUR
 s1=now-45*H;h1=[row(s1+i*H,100,101,99,100) for i in range(45)]
@@ -88,4 +90,29 @@ assert p_hi and abs(p_hi.qty-(p_hi.risk_usdt/(m.STOP_ATR*p_hi.atr)))<1e-12
 assert p_hi.qty*p_hi.entry>10000
 # 18 delayed first successful feed cycle with no persisted watermark is still bootstrap-only
 assert m.should_process(None,200,False)==(False,200)
-print('18/18 PASS')
+# 19 page merge is chronological, deduplicated and ignores unconfirmed rows
+base=1_700_000_000_000
+pg1=[row(base+2*m.MINUTE,1,2,.5,1.5),row(base+m.MINUTE,1,2,.5,1.4)]
+pg2=[row(base+m.MINUTE,1,2,.5,1.4),row(base,1,2,.5,1.3),row(base-m.MINUTE,1,2,.5,1.2,'0')]
+merged=rp.merge_pages([pg1,pg2],base+3*m.MINUTE,base)
+assert [x['ot'] for x in merged]==[base,base+m.MINUTE,base+2*m.MINUTE]
+# 20 internal coverage gaps are detected, not just a missing first bar
+gappy=[{'ot':base,'ct':base+m.MINUTE},{'ot':base+2*m.MINUTE,'ct':base+3*m.MINUTE}]
+gap=rp.first_gap(gappy,base,base+3*m.MINUTE)
+assert gap and gap['missing_open_ms']==base+m.MINUTE
+# 21 full 72h minute sequence passes continuity check
+bars72=[{'ot':base+i*m.MINUTE,'ct':base+(i+1)*m.MINUTE} for i in range(72*60)]
+assert rp.first_gap(bars72,base,base+72*m.HOUR) is None
+# 22 replay window caps at first minute close representing the 72h deadline
+opened=base+15_000;deadline=opened+72*m.HOUR
+w=rp.replay_window(opened,opened,deadline+8*m.HOUR,72*m.HOUR)
+assert w['deadline_ms']==deadline and w['cutoff_ms']==((deadline+m.MINUTE-1)//m.MINUTE)*m.MINUTE
+# 23 target in a deadline-straddling minute cannot beat TIME
+cross_open=(deadline//m.MINUTE)*m.MINUTE
+cross={'ot':cross_open,'ct':cross_open+m.MINUTE,'h':120,'l':95,'c':105}
+time_pos={'side':'LONG','stop':90,'target':110,'opened_ms':opened}
+assert m.exit_from_1m(time_pos,[cross],cross['ct'])[0]=='TIME'
+# 24 STOP remains conservative winner in a deadline-straddling minute
+cross_bad={'ot':cross_open,'ct':cross_open+m.MINUTE,'h':120,'l':80,'c':100}
+assert m.exit_from_1m(time_pos,[cross_bad],cross_bad['ct'])[0]=='STOP'
+print('24/24 PASS')
