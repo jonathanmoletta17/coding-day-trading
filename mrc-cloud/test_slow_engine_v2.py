@@ -29,16 +29,25 @@ assert p.signal_id==p2.signal_id
 # 7: frozen daily lock blocks an otherwise executable breakout
 ctx_lock,p_lock=m.evaluate('BTCUSDT',list(reversed(h1)),list(reversed(h4)),106,106.1,now,10000,daily_locked=True)
 assert p_lock and p_lock.decision=='NO_TRADE' and ctx_lock['state']=='DAILY_LOCKED'
+# 8: EMA calculation ignores confirmed 4H history older than the research max-120 window
+start4=now-130*F
+h4_long=[]
+for i in range(130):
+    c=1_000_000_000.0 if i<10 else 100.0+(i-10)*0.5
+    h4_long.append(row(start4+i*F,c,c+1,c-1,c))
+ctx_long,_=m.evaluate('BTCUSDT',list(reversed(h1)),list(reversed(h4_long)),106,106.1,now,10000)
+ctx_tail,_=m.evaluate('BTCUSDT',list(reversed(h1)),list(reversed(h4_long[-120:])),106,106.1,now,10000)
+assert abs(ctx_long['ema20_4h']-ctx_tail['ema20_4h'])<1e-12 and abs(ctx_long['ema50_4h']-ctx_tail['ema50_4h'])<1e-12
 
 with tempfile.TemporaryDirectory() as td:
     dbfile=str(Path(td)/'state.sqlite3')
     a=s.Store(dbfile,'')
     a.set('last_processed_1h_close:BTCUSDT',123456789)
-    # 8: decision events are idempotent by strategy+symbol+close
+    # 9: decision events are idempotent by strategy+symbol+close
     assert a.record_decision(m.STRATEGY,'BTCUSDT',123456789,'2027-01-15T08:00:00+00:00',ctx,p) is True
     assert a.record_decision(m.STRATEGY,'BTCUSDT',123456789,'2027-01-15T08:00:01+00:00',ctx,p) is False
     assert a.decision_count('BTCUSDT')==1
-    # 9: trade accounting feeds prospective audit and UTC daily PnL
+    # 10: trade accounting feeds prospective audit and UTC daily PnL
     assert a.record_signal(p,'2027-01-15T08:00:00+00:00') is True
     assert a.open(p,now) is True
     t=a.open_trade();assert t and t['signal_id']==p.signal_id
@@ -47,10 +56,10 @@ with tempfile.TemporaryDirectory() as td:
     assert audit['closed_trades']==1 and audit['paper_trades_total']==1 and audit['expectancy_net_R']<0
     assert a.daily_realized_pnl(now+m.MINUTE)<0
     a.close_conn()
-    # 10: watermark + audit + trade history survive store restart
+    # 11: watermark + audit + trade history survive store restart
     b=s.Store(dbfile,'')
     assert b.get_int('last_processed_1h_close:BTCUSDT')==123456789
     assert b.decision_count('BTCUSDT')==1
     assert b.audit_summary(0.0006,10000,now+m.MINUTE)['closed_trades']==1
     b.close_conn()
-print('10/10 PASS')
+print('11/11 PASS')
