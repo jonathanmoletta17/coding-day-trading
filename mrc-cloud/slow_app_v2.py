@@ -18,6 +18,8 @@ DATABASE_URL=os.getenv("DATABASE_URL","").strip()
 START_EQUITY=float(os.getenv("MRC_PAPER_EQUITY","10000"))
 RISK_PCT=float(os.getenv("MRC_RISK_PCT","0.0025"))
 COST=float(os.getenv("MRC_ROUNDTRIP_COST","0.0006"))
+COST_SCENARIOS={"baseline_6bps":COST,"stress_10bps":0.0010,"stress_15bps":0.0015}
+DEMO_CALIBRATION_BPS=float(os.getenv("MRC_DEMO_CALIBRATION_BPS","0") or 0)
 DAILY_LOCK_PCT=.01
 RELEASE_SHA=os.getenv("MRC_SLOW_RELEASE_SHA","UNPINNED")
 DURABLE_STORAGE=bool(DATABASE_URL) or (not DATABASE_URL and os.path.abspath(DB_PATH).startswith("/data/"))
@@ -41,7 +43,7 @@ def load_telemetry():
 def refresh_telemetry():STATE["telemetry"]=load_telemetry()
 
 class OKX:
-    def __init__(self):self.h=httpx.AsyncClient(timeout=12,headers={"User-Agent":"MRC-Slow-Staging/4.4"})
+    def __init__(self):self.h=httpx.AsyncClient(timeout=12,headers={"User-Agent":"MRC-Slow-Staging/4.5"})
     async def g(self,path,**params):
         r=await self.h.get(BASE+path,params=params);r.raise_for_status();j=r.json()
         if j.get("code")!="0":raise RuntimeError(f"OKX {j.get('code')} {j.get('msg')}")
@@ -90,9 +92,12 @@ class OKX:
 
 STATE={
     "started_at":iso(),"heartbeat":0.0,"symbols":{},"last_error":None,"strategy":eng.STRATEGY,
-    "mode":"PAPER_STAGING","version":"slow-staging-v4.4-paginated-replay","release_sha":RELEASE_SHA,"coverage_gap":None,
+    "mode":"PAPER_STAGING","version":"slow-staging-v4.5-cost-sensitivity","release_sha":RELEASE_SHA,"coverage_gap":None,
     "storage":{"backend":db.backend,"durable":DURABLE_STORAGE,"sqlite_path":DB_PATH if db.backend=="sqlite" else None},
     "replay":{"max_hold_h":eng.MAX_HOLD_H,"history_page_limit":HISTORY_PAGE_LIMIT,"last":None},
+    "cost_policy":{"paper_baseline_bps":COST*10000.0,"audit_scenarios_bps":{k:v*10000.0 for k,v in COST_SCENARIOS.items()},
+                   "demo_calibration_bps":DEMO_CALIBRATION_BPS if DEMO_CALIBRATION_BPS>0 else None,
+                   "role":"audit_only_scenarios_do_not_affect_signals_or_trade_management"},
     "risk_controls":{
         "risk_pct":RISK_PCT,"daily_loss_lock_pct":DAILY_LOCK_PCT,"daily_locked":False,"daily_realized_pnl_utc":0.0,
         "max_signal_age_min":eng.MAX_AGE_MIN,"max_signal_age_role":"operational_guard_after_downtime_not_research_edge",
@@ -115,11 +120,9 @@ async def manage_open(client,now_ms):
         STATE["coverage_gap"]=f"{t['symbol']} 1M_COVERAGE_GAP missing {iso(gap['missing_open_ms'])} through {iso(gap['expected_through_open_ms'])}"
         return
     STATE["coverage_gap"]=None
-    # Historical closed bars always win causally over the current ticker.
     ex=eng.exit_from_1m(t,bars,now_ms)
     if ex:
         outcome,px,closed_ms=ex;db.close(t,px,outcome,closed_ms,COST);return
-    # Only after replay is exhausted may the live incomplete minute trigger STOP.
     tick=await client.ticker(t["symbol"]);bid=eng.f(tick.get("bidPx"));ask=eng.f(tick.get("askPx"))
     instant=eng.current_stop_from_ticker(t,bid,ask,now_ms)
     if instant:
@@ -178,7 +181,7 @@ async def life(app):
     global TASK
     TASK=asyncio.create_task(loop());yield;TASK.cancel();db.close_conn()
 
-app=FastAPI(title="MRC Slow Trend Staging",version="4.4",lifespan=life)
+app=FastAPI(title="MRC Slow Trend Staging",version="4.5",lifespan=life)
 def checks():return {s:bool(STATE["symbols"].get(s,{}).get("context",{}).get("ready") and not STATE["symbols"].get(s,{}).get("error")) for s in SYMBOLS}
 @app.get("/healthz")
 async def health():
@@ -197,10 +200,15 @@ async def api_state():
 async def api_audit():
     now_ms=int(time.time()*1000)
     return {"strategy":eng.STRATEGY,"mode":"PAPER_STAGING","release_sha":RELEASE_SHA,"storage":{"backend":db.backend,"durable":DURABLE_STORAGE},
-        "replay":STATE["replay"],"risk_controls":STATE["risk_controls"],"prospective":db.audit_summary(COST,START_EQUITY,now_ms),
+        "replay":STATE["replay"],"risk_controls":STATE["risk_controls"],"cost_policy":STATE["cost_policy"],
+        "prospective":db.audit_summary(COST,START_EQUITY,now_ms),"cost_sensitivity":db.cost_sensitivity(COST_SCENARIOS,START_EQUITY),
         "recent_decisions":db.recent_decisions(20),"recent_trades":db.recent(20)}
+@app.get("/api/cost-sensitivity")
+async def api_cost_sensitivity():
+    return {"strategy":eng.STRATEGY,"mode":"PAPER_STAGING","release_sha":RELEASE_SHA,"cost_policy":STATE["cost_policy"],
+            "scenarios":db.cost_sensitivity(COST_SCENARIOS,START_EQUITY)}
 @app.get("/",response_class=HTMLResponse)
 async def root():
     return """<html><body style='background:#071019;color:#eaf2f8;font-family:system-ui;padding:28px'><h1>MRC Slow Trend — PAPER AUDIT</h1>
-    <p>4H EMA20/50 + 1H Donchian20 + ATR14 · PAPER ONLY</p><p><a style='color:#70c7ff' href='/api/state'>State</a> · <a style='color:#70c7ff' href='/api/audit'>Audit</a> · <a style='color:#70c7ff' href='/readyz'>Readiness</a></p>
+    <p>4H EMA20/50 + 1H Donchian20 + ATR14 · PAPER ONLY</p><p><a style='color:#70c7ff' href='/api/state'>State</a> · <a style='color:#70c7ff' href='/api/audit'>Audit</a> · <a style='color:#70c7ff' href='/api/cost-sensitivity'>Costs</a> · <a style='color:#70c7ff' href='/readyz'>Readiness</a></p>
     <div id='x'>loading…</div><script>async function g(){let r=await fetch('/api/audit'),x=await r.json();document.querySelector('#x').innerHTML='<pre>'+JSON.stringify(x,null,2)+'</pre>'};g();setInterval(g,10000)</script></body></html>"""
