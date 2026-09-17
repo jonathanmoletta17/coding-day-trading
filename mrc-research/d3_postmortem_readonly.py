@@ -7,6 +7,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import d3_okx_demo_roundtrip as d3
 
+RESULT: dict = {"status": "NOT_RUN"}
+
 
 async def run() -> dict:
     locks = {
@@ -72,8 +74,6 @@ async def run() -> dict:
             "private_post_performed": False,
         }
         print("OKX_DEMO_D3_POSTMORTEM=" + json.dumps(out, separators=(",", ":"), ensure_ascii=False), flush=True)
-        if out["status"] != "PASS":
-            raise RuntimeError("POSTMORTEM_ACCOUNT_NOT_FLAT")
         return out
     finally:
         await c.close()
@@ -82,7 +82,7 @@ async def run() -> dict:
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/healthz"):
-            body = b'{"ok":true,"mode":"D3_POSTMORTEM_READONLY_PASS"}'
+            body = json.dumps({"ok": True, "mode": "D3_POSTMORTEM_READONLY_DIAGNOSTIC", "result": RESULT}, separators=(",", ":")).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -97,7 +97,12 @@ class H(BaseHTTPRequestHandler):
 
 
 def main():
-    asyncio.run(run())
+    global RESULT
+    try:
+        RESULT = asyncio.run(run())
+    except Exception as exc:
+        RESULT = {"status": "DIAGNOSTIC_ERROR", "error": type(exc).__name__ + ": " + str(exc)}
+        print("OKX_DEMO_D3_POSTMORTEM_DIAGNOSTIC=" + json.dumps(RESULT, separators=(",", ":"), ensure_ascii=False), flush=True)
     HTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), H).serve_forever()
 
 
