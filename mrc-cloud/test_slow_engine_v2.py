@@ -81,4 +81,9 @@ with tempfile.TemporaryDirectory() as td:
     assert a.open(equal,now+2*m.MINUTE) is False
     assert a.open(later,now+2*m.MINUTE) is True
     a.close_conn()
-print('16/16 PASS')
+
+# 17 sizing is pure stop-risk parity with research; no implicit 1x notional cap
+_,p_hi=m.evaluate('BTCUSDT',list(reversed(h1)),list(reversed(h4)),106,106.1,now,10000,risk_pct=.5)
+assert p_hi and abs(p_hi.qty-(p_hi.risk_usdt/(m.STOP_ATR*p_hi.atr)))<1e-12
+assert p_hi.qty*p_hi.entry>10000
+print('17/17 PASS')
