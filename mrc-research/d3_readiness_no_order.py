@@ -102,7 +102,7 @@ async def run() -> dict:
             "client_ids_unique": len(set(client_ids.values())) == 3,
             "client_ids_within_limit": all(len(x) <= 32 and x.isalnum() for x in client_ids.values()),
             "order_submission_blocked": True,
-            "private_post_performed": False,
+            "private_post_not_performed": True,
             "real_money_execution_blocked": True,
         }
 
