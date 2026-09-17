@@ -5,20 +5,21 @@ import forward_paper_evidence_gate as gate
 RELEASE = gate.EXPECTED_RELEASE
 
 
-def fixtures(decisions=16, candidates=0, trades=0, closed=0):
+def fixtures(decisions=16, candidates=0, trades=0, closed=0, open_position=False):
     ready = {
         "ready": True,
         "checks": {"BTCUSDT": True, "ETHUSDT": True},
         "coverage_gap": None,
         "durable_storage": True,
         "release_sha": RELEASE,
+        "evidence_integrity_pass": True,
     }
     prospective = {
         "decision_events": decisions,
         "breakout_candidates": candidates,
         "paper_trades_total": trades,
         "closed_trades": closed,
-        "open_position": False,
+        "open_position": open_position,
         "wins": 0,
         "losses": closed,
         "win_rate": 0.0 if closed else None,
@@ -50,15 +51,41 @@ def fixtures(decisions=16, candidates=0, trades=0, closed=0):
         "release_sha": RELEASE,
         "scenarios": audit["cost_sensitivity"],
     }
-    return ready, audit, costs
+    evidence_quality = {
+        "read_only": True,
+        "integrity_pass": True,
+        "decision_events_total": decisions,
+        "signals_total": candidates,
+        "paper_trades_total": trades,
+        "closed_paper_trades": closed,
+        "open_paper_trades": 1 if open_position else 0,
+        "historical_unpaired_decision_closes": [],
+        "per_symbol": {
+            "BTCUSDT": {"decision_events": decisions // 2},
+            "ETHUSDT": {"decision_events": decisions - decisions // 2},
+        },
+    }
+    evidence = {
+        "strategy": "SLOW_TREND_BREAKOUT_V1",
+        "mode": "PAPER_STAGING",
+        "release_sha": RELEASE,
+        "evidence_quality": evidence_quality,
+    }
+    return ready, audit, costs, evidence
+
+
+def evaluate_fixture(*args, previous=None, **kwargs):
+    ready, audit, costs, evidence = fixtures(*args, **kwargs)
+    return gate.evaluate(ready, audit, costs, evidence, previous)
 
 
 def test_initial_zero_trade_state_passes_operationally():
-    ready, audit, costs = fixtures()
-    out = gate.evaluate(ready, audit, costs)
+    out = evaluate_fixture()
     assert out["status"] == "PASS"
     assert out["economic_evidence"]["sample_state"] == "NO_CLOSED_PROSPECTIVE_TRADES"
     assert out["economic_evidence"]["sample_band"] == "N0"
+    assert out["economic_evidence"]["evidence_quality"]["integrity_pass"] is True
+    assert len(out["snapshot_fingerprint_sha256"]) == 64
     assert out["r0"]["status"] == "BLOCKED"
     assert out["r0"]["real_money_allowed"] is False
     assert out["mutation_performed"] is False
@@ -68,8 +95,7 @@ def test_initial_zero_trade_state_passes_operationally():
 
 def test_sample_bands_are_descriptive_only():
     for n, expected in ((1, "N1_9"), (9, "N1_9"), (10, "N10_29"), (29, "N10_29"), (30, "N30_49"), (49, "N30_49"), (50, "N50_PLUS")):
-        ready, audit, costs = fixtures(decisions=50 + n, candidates=n, trades=n, closed=n)
-        out = gate.evaluate(ready, audit, costs)
+        out = evaluate_fixture(decisions=50 + n, candidates=n, trades=n, closed=n)
         assert out["status"] == "PASS"
         assert out["economic_evidence"]["sample_band"] == expected
         assert out["economic_evidence"]["sample_band_role"] == "descriptive_only_not_an_automatic_promotion_threshold"
@@ -77,10 +103,8 @@ def test_sample_bands_are_descriptive_only():
 
 
 def test_counter_regression_fails_closed():
-    ready, audit, costs = fixtures(decisions=20, candidates=2, trades=1, closed=1)
-    previous = gate.evaluate(ready, audit, costs)
-    ready2, audit2, costs2 = fixtures(decisions=19, candidates=1, trades=0, closed=0)
-    out = gate.evaluate(ready2, audit2, costs2, previous)
+    previous = evaluate_fixture(decisions=20, candidates=2, trades=1, closed=1)
+    out = evaluate_fixture(decisions=19, candidates=1, trades=0, closed=0, previous=previous)
     assert out["status"] == "FAIL"
     assert "decision_events:20->19" in out["regression_details"]
     assert "breakout_candidates:2->1" in out["regression_details"]
@@ -90,33 +114,55 @@ def test_counter_regression_fails_closed():
 
 
 def test_release_change_does_not_compare_counters_across_release_boundary():
-    ready, audit, costs = fixtures(decisions=20, candidates=2, trades=1, closed=1)
-    previous = gate.evaluate(ready, audit, costs)
-    ready2, audit2, costs2 = fixtures(decisions=1, candidates=0, trades=0, closed=0)
-    audit2 = deepcopy(audit2)
-    ready2 = deepcopy(ready2)
-    costs2 = deepcopy(costs2)
-    audit2["release_sha"] = "different-release"
-    ready2["release_sha"] = "different-release"
-    costs2["release_sha"] = "different-release"
-    out = gate.evaluate(ready2, audit2, costs2, previous)
+    previous = evaluate_fixture(decisions=20, candidates=2, trades=1, closed=1)
+    ready, audit, costs, evidence = fixtures(decisions=1, candidates=0, trades=0, closed=0)
+    audit = deepcopy(audit); ready = deepcopy(ready); costs = deepcopy(costs); evidence = deepcopy(evidence)
+    audit["release_sha"] = "different-release"
+    ready["release_sha"] = "different-release"
+    costs["release_sha"] = "different-release"
+    evidence["release_sha"] = "different-release"
+    out = gate.evaluate(ready, audit, costs, evidence, previous)
     assert out["operational_checks"]["decision_events_monotonic"] is True
-    assert out["operational_checks"]["release_pinned"] is False
+    assert out["operational_checks"]["release_pinned_across_endpoints"] is False
     assert out["status"] == "FAIL"
 
 
 def test_baseline_mutation_fails_gate():
-    ready, audit, costs = fixtures()
+    ready, audit, costs, evidence = fixtures()
     audit["cost_policy"]["paper_baseline_bps"] = 10.01
-    out = gate.evaluate(ready, audit, costs)
+    out = gate.evaluate(ready, audit, costs, evidence)
     assert out["status"] == "FAIL"
     assert out["operational_checks"]["baseline_6bps_preserved"] is False
     assert out["r0"]["status"] == "BLOCKED"
 
 
 def test_coverage_gap_fails_gate():
-    ready, audit, costs = fixtures()
+    ready, audit, costs, evidence = fixtures()
     ready["coverage_gap"] = "BTCUSDT gap"
-    out = gate.evaluate(ready, audit, costs)
+    out = gate.evaluate(ready, audit, costs, evidence)
     assert out["status"] == "FAIL"
     assert out["operational_checks"]["coverage_gap_clear"] is False
+
+
+def test_evidence_integrity_failure_fails_gate():
+    ready, audit, costs, evidence = fixtures()
+    evidence["evidence_quality"]["integrity_pass"] = False
+    ready["evidence_integrity_pass"] = False
+    out = gate.evaluate(ready, audit, costs, evidence)
+    assert out["status"] == "FAIL"
+    assert out["operational_checks"]["evidence_integrity_pass"] is False
+    assert "PAPER_EVIDENCE_INTEGRITY_NOT_CLEAN" in out["r0"]["block_reasons"]
+
+
+def test_cross_endpoint_count_mismatch_fails_gate():
+    ready, audit, costs, evidence = fixtures(decisions=18)
+    evidence["evidence_quality"]["decision_events_total"] = 16
+    out = gate.evaluate(ready, audit, costs, evidence)
+    assert out["status"] == "FAIL"
+    assert out["operational_checks"]["evidence_decision_count_matches_audit"] is False
+
+
+def test_open_position_count_parity():
+    out = evaluate_fixture(decisions=20, candidates=1, trades=1, closed=0, open_position=True)
+    assert out["status"] == "PASS"
+    assert out["operational_checks"]["evidence_open_count_matches_audit"] is True
