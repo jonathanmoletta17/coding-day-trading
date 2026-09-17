@@ -47,7 +47,8 @@ class Candidate:
     don_hi:float; don_lo:float; chase_atr:float; risk_usdt:float; qty:float; reason:str
 
 
-def evaluate(symbol:str,h1_rows:list,h4_rows:list,bid:float,ask:float,now_ms:int,equity:float,risk_pct:float=.0025,slot_open:bool=False,daily_locked:bool=False):
+def evaluate(symbol:str,h1_rows:list,h4_rows:list,bid:float,ask:float,now_ms:int,equity:float,risk_pct:float=.0025,
+             slot_open:bool=False,reentry_blocked:bool=False,daily_locked:bool=False):
     h1=confirmed(h1_rows,HOUR,now_ms)
     h4=confirmed(h4_rows,FOUR_HOUR,now_ms)[-120:]
     if len(h1)<40 or len(h4)<50:return {'state':'DATA_ERROR','ready':False},None
@@ -66,6 +67,7 @@ def evaluate(symbol:str,h1_rows:list,h4_rows:list,bid:float,ask:float,now_ms:int
     if age>MAX_AGE_MIN:decision='NO_TRADE';state='TOO_EXTENDED';why.append('stale')
     if chase>MAX_CHASE_ATR:decision='NO_TRADE';state='TOO_EXTENDED';why.append('chase')
     if slot_open:decision='NO_TRADE';state='BLOCKED_POSITION_OPEN';why.append('slot')
+    if reentry_blocked:decision='NO_TRADE';state='BLOCKED_REENTRY_TIME';why.append('strict_next_entry_gt_prior_exit')
     if daily_locked:decision='NO_TRADE';state='DAILY_LOCKED';why.append('daily_lock')
     sid=hashlib.sha256(f'{STRATEGY}:{symbol}:{sig["ct"]}:{side}'.encode()).hexdigest()[:24]
     p=Candidate(symbol,sid,side,decision,int(sig['ct']),sig['c'],entry,stop,target,a,e20,e50,hi,lo,chase,risk,qty,';'.join(why))
