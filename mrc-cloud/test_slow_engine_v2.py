@@ -33,7 +33,14 @@ assert p_lock and p_lock.decision=='NO_TRADE' and ctx_lock['state']=='DAILY_LOCK
 # 8 strict research reentry rule is explicit
 ctx_re,p_re=m.evaluate('BTCUSDT',list(reversed(h1)),list(reversed(h4)),106,106.1,now,10000,reentry_blocked=True)
 assert p_re and p_re.decision=='NO_TRADE' and ctx_re['state']=='BLOCKED_REENTRY_TIME'
-# 9 EMA ignores confirmed 4H history older than max-120 research window
+# 9 first monitored 1m bar cannot contain pre-entry seconds
+assert m.first_full_minute_open(now)==now
+assert m.first_full_minute_open(now+15_000)==now+m.MINUTE
+# 10 incomplete-minute ticker can trigger STOP but never TARGET
+pos={'side':'LONG','stop':100,'target':110,'opened_ms':now}
+assert m.current_stop_from_ticker(pos,99.9,100.0,now+20_000)[0]=='STOP'
+assert m.current_stop_from_ticker(pos,111.0,111.1,now+20_000) is None
+# 11 EMA ignores confirmed 4H history older than max-120 research window
 start4=now-130*F;h4_long=[]
 for i in range(130):
     c=1_000_000_000.0 if i<10 else 100.0+(i-10)*0.5
@@ -44,18 +51,18 @@ assert abs(ctx_long['ema20_4h']-ctx_tail['ema20_4h'])<1e-12 and abs(ctx_long['em
 
 with tempfile.TemporaryDirectory() as td:
     dbfile=str(Path(td)/'state.sqlite3');a=s.Store(dbfile,'');a.set('last_processed_1h_close:BTCUSDT',123456789)
-    # 10 decision events idempotent by strategy+symbol+close
+    # 12 decision events idempotent by strategy+symbol+close
     assert a.record_decision(m.STRATEGY,'BTCUSDT',123456789,'2027-01-15T08:00:00+00:00',ctx,p) is True
     assert a.record_decision(m.STRATEGY,'BTCUSDT',123456789,'2027-01-15T08:00:01+00:00',ctx,p) is False
     assert a.decision_count('BTCUSDT')==1
-    # 11 trade accounting feeds prospective audit + UTC daily PnL
+    # 13 trade accounting feeds prospective audit + UTC daily PnL
     assert a.record_signal(p,'2027-01-15T08:00:00+00:00') is True and a.open(p,now) is True
     t=a.open_trade();assert t and t['signal_id']==p.signal_id
     a.close(t,p.stop,'STOP',now+m.MINUTE,0.0006)
     audit=a.audit_summary(0.0006,10000,now+m.MINUTE)
     assert audit['closed_trades']==1 and audit['paper_trades_total']==1 and audit['expectancy_net_R']<0 and a.daily_realized_pnl(now+m.MINUTE)<0
     a.close_conn()
-    # 12 watermark + audit + trade history survive restart
+    # 14 watermark + audit + trade history survive restart
     b=s.Store(dbfile,'')
     assert b.get_int('last_processed_1h_close:BTCUSDT')==123456789 and b.decision_count('BTCUSDT')==1
     assert b.audit_summary(0.0006,10000,now+m.MINUTE)['closed_trades']==1
@@ -63,15 +70,15 @@ with tempfile.TemporaryDirectory() as td:
 
 with tempfile.TemporaryDirectory() as td:
     dbfile=str(Path(td)/'slot.sqlite3');a=s.Store(dbfile,'')
-    # 13 database physically enforces one global OPEN position
+    # 15 database physically enforces one global OPEN position
     assert a.open(p,now) is True
     other=replace(p,signal_id='other-signal-id',symbol='ETHUSDT')
     assert a.open(other,now+1) is False and a.trade_count()==1
     t=a.open_trade();a.close(t,p.stop,'STOP',now+m.MINUTE,0.0006)
-    # 14 strict next entry > prior exit: equality rejected, later timestamp allowed
+    # 16 strict next entry > prior exit: equality rejected, later timestamp allowed
     equal=replace(p,signal_id='equal-exit-signal',signal_ms=now+m.MINUTE)
     later=replace(p,signal_id='later-signal',signal_ms=now+2*m.MINUTE)
     assert a.open(equal,now+2*m.MINUTE) is False
     assert a.open(later,now+2*m.MINUTE) is True
     a.close_conn()
-print('14/14 PASS')
+print('16/16 PASS')
