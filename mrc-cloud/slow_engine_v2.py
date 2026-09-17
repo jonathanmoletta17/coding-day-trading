@@ -92,13 +92,32 @@ def evaluate(symbol:str,h1_rows:list,h4_rows:list,bid:float,ask:float,now_ms:int
 
 
 def exit_from_1m(position:dict,bars:list[dict],now_ms:int):
-    """STOP wins when stop and target are both touched inside the same closed 1m bar."""
+    """Causal closed-1m exit evaluation with hard 72h max hold.
+
+    STOP wins same-bar ambiguity. TARGET is only eligible on bars fully closed by
+    the 72h deadline. If a 1m bar straddles the deadline, STOP remains the
+    conservative outcome when touched; otherwise TIME exits at that bar close.
+    This prevents post-deadline target/stop events from being counted first.
+    """
     side=position['side'];stop=f(position['stop']);target=f(position['target'])
+    deadline=int(position['opened_ms'])+MAX_HOLD_H*HOUR
     for b in sorted(bars,key=lambda x:x['ot']):
-        stop_hit=(b['l']<=stop if side=='LONG' else b['h']>=stop);target_hit=(b['h']>=target if side=='LONG' else b['l']<=target)
-        if stop_hit:return 'STOP',stop,int(b['ct'])
-        if target_hit:return 'TARGET',target,int(b['ct'])
-    if now_ms>=int(position['opened_ms'])+MAX_HOLD_H*HOUR and bars:return 'TIME',f(bars[-1]['c']),int(bars[-1]['ct'])
+        ot=int(b['ot']);ct=int(b['ct'])
+        if ot>=deadline:break
+        stop_hit=(b['l']<=stop if side=='LONG' else b['h']>=stop)
+        target_hit=(b['h']>=target if side=='LONG' else b['l']<=target)
+        if ct<deadline:
+            if stop_hit:return 'STOP',stop,ct
+            if target_hit:return 'TARGET',target,ct
+            continue
+        if ct==deadline:
+            if stop_hit:return 'STOP',stop,ct
+            if target_hit:return 'TARGET',target,ct
+            return 'TIME',f(b['c']),ct
+        # Bar straddles the exact deadline. Target is not allowed to win because
+        # its touch could have happened after max-hold; STOP remains conservative.
+        if stop_hit:return 'STOP',stop,ct
+        return 'TIME',f(b['c']),ct
     return None
 
 
