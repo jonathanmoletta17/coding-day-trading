@@ -49,16 +49,16 @@ class Store:
         r=self.c.execute("SELECT * FROM trades WHERE outcome='OPEN' ORDER BY opened_ms LIMIT 1").fetchone()
         return dict(r) if r else None
     def record_signal(self,p):
-        self.c.execute("INSERT OR IGNORE INTO signals VALUES(?,?,?,?,?,?,?)",
+        cur=self.c.execute("INSERT OR IGNORE INTO signals VALUES(?,?,?,?,?,?,?)",
             (p.signal_id,p.symbol,p.side,p.decision,p.signal_ms,json.dumps(p.__dict__),iso()))
-        self.c.commit()
+        self.c.commit(); return cur.rowcount==1
     def open(self,p,now_ms):
         if self.open_trade(): return False
-        self.c.execute("""INSERT OR IGNORE INTO trades(
+        cur=self.c.execute("""INSERT OR IGNORE INTO trades(
           trade_id,signal_id,symbol,side,entry,stop,target,qty,risk,opened_ms,last_check_ms,outcome,pnl,r_net
         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,0)""",
           ("slow_"+p.signal_id,p.signal_id,p.symbol,p.side,p.entry,p.stop,p.target,p.qty,p.risk_usdt,now_ms,now_ms,"OPEN"))
-        self.c.commit(); return True
+        self.c.commit(); return cur.rowcount==1
     def mark_checked(self,trade_id,ms):
         self.c.execute("UPDATE trades SET last_check_ms=? WHERE trade_id=?",(ms,trade_id)); self.c.commit()
     def close(self,t,px,outcome,closed_ms):
@@ -106,8 +106,17 @@ def one_minute(rows,cutoff):
             out.append({"ot":ot,"ct":ct,"o":eng.f(r[1]),"h":eng.f(r[2]),"l":eng.f(r[3]),"c":eng.f(r[4])})
     return sorted(out,key=lambda x:x["ot"])
 
-STATE={"started_at":iso(),"heartbeat":0.0,"symbols":{},"last_error":None,"strategy":eng.STRATEGY,
-       "mode":"PAPER_STAGING","version":"slow-staging-v2","coverage_gap":None}
+STATE={
+    "started_at":iso(),"heartbeat":0.0,"symbols":{},"last_error":None,"strategy":eng.STRATEGY,
+    "mode":"PAPER_STAGING","version":"slow-staging-v2","coverage_gap":None,
+    "telemetry":{
+        "last_processed_close":{s:None for s in SYMBOLS},
+        "processed_close_count":{s:0 for s in SYMBOLS},
+        "last_decision_at":{s:None for s in SYMBOLS},
+        "signals_created":0,
+        "paper_positions_opened":0,
+    },
+}
 LOCK=asyncio.Lock(); TASK=None
 
 async def manage_open(client,now_ms):
@@ -152,10 +161,18 @@ async def loop():
                     action="WATERMARK_ONLY"
                     if current_close:
                         db.set(key,newmark)
-                    if process and p:
-                        db.record_signal(p); action=p.decision
-                        if p.decision in ("LONG","SHORT") and not slot and not STATE["coverage_gap"]:
-                            if db.open(p,now_ms): slot=True; action="PAPER_OPEN"
+                    if process:
+                        tel=STATE["telemetry"]
+                        tel["last_processed_close"][s]=int(newmark)
+                        tel["processed_close_count"][s]+=1
+                        tel["last_decision_at"][s]=iso(now_ms)
+                        if p:
+                            created=db.record_signal(p)
+                            if created: tel["signals_created"]+=1
+                            action=p.decision
+                            if p.decision in ("LONG","SHORT") and not slot and not STATE["coverage_gap"]:
+                                if db.open(p,now_ms):
+                                    slot=True; action="PAPER_OPEN"; tel["paper_positions_opened"]+=1
                     async with LOCK:
                         STATE["symbols"][s]={"context":ctx,"candidate":p.__dict__ if p else None,
                                              "watermark":newmark if current_close else None,
@@ -179,7 +196,7 @@ async def life(app):
     yield
     TASK.cancel()
 
-app=FastAPI(title="MRC Slow Trend Staging",version="2.0",lifespan=life)
+app=FastAPI(title="MRC Slow Trend Staging",version="2.1",lifespan=life)
 
 def checks():
     return {s:bool(STATE["symbols"].get(s,{}).get("context",{}).get("ready") and not STATE["symbols"].get(s,{}).get("error")) for s in SYMBOLS}
