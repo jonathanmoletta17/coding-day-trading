@@ -48,7 +48,8 @@ class Candidate:
 
 
 def evaluate(symbol:str,h1_rows:list,h4_rows:list,bid:float,ask:float,now_ms:int,equity:float,risk_pct:float=.0025,slot_open:bool=False,daily_locked:bool=False):
-    h1=confirmed(h1_rows,HOUR,now_ms); h4=confirmed(h4_rows,FOUR_HOUR,now_ms)
+    h1=confirmed(h1_rows,HOUR,now_ms)
+    h4=confirmed(h4_rows,FOUR_HOUR,now_ms)[-120:]
     if len(h1)<40 or len(h4)<50:return {'state':'DATA_ERROR','ready':False},None
     sig=h1[-1]; prev=h1[-21:-1]; hi=max(x['h'] for x in prev); lo=min(x['l'] for x in prev); a=atr_wilder(h1[-40:])
     e20=ema([x['c'] for x in h4],20); e50=ema([x['c'] for x in h4],50); trend='UP' if e20>e50 else 'DOWN' if e20<e50 else 'NEUTRAL'
