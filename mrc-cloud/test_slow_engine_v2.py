@@ -1,5 +1,7 @@
 import importlib.util,sys
-spec=importlib.util.spec_from_file_location('e','/tmp/slow_engine_v2.py');m=importlib.util.module_from_spec(spec);sys.modules['e']=m;spec.loader.exec_module(m)
+from pathlib import Path
+engine_path=Path(__file__).with_name('slow_engine_v2.py')
+spec=importlib.util.spec_from_file_location('e',engine_path);m=importlib.util.module_from_spec(spec);sys.modules['e']=m;spec.loader.exec_module(m)
 def row(ot,o,h,l,c,q='1'):return [str(ot),str(o),str(h),str(l),str(c),'1','1','1',q]
 now=1_800_000_000_000; H=m.HOUR; F=m.FOUR_HOUR
 s1=now-45*H; h1=[row(s1+i*H,100,101,99,100) for i in range(45)]
