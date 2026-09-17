@@ -20,7 +20,7 @@ assert ctx['don_hi']==105 and ctx['trend']=='UP' and p and p.side=='LONG'
 assert m.exit_from_1m({'side':'LONG','stop':100,'target':110,'opened_ms':now},[{'ot':now,'ct':now+m.MINUTE,'h':111,'l':99,'c':106}],now+m.MINUTE)[0]=='STOP'
 # 3 target-only touch
 assert m.exit_from_1m({'side':'LONG','stop':100,'target':110,'opened_ms':now},[{'ot':now,'ct':now+m.MINUTE,'h':111,'l':101,'c':109}],now+m.MINUTE)[0]=='TARGET'
-# 4 fresh boot watermark only
+# 4 first-ever observation for a symbol is watermark-only
 assert m.should_process(None,100,True)==(False,100)
 # 5 persisted older watermark processes newer close
 assert m.should_process(100,200,True)==(True,200)
@@ -86,4 +86,6 @@ with tempfile.TemporaryDirectory() as td:
 _,p_hi=m.evaluate('BTCUSDT',list(reversed(h1)),list(reversed(h4)),106,106.1,now,10000,risk_pct=.5)
 assert p_hi and abs(p_hi.qty-(p_hi.risk_usdt/(m.STOP_ATR*p_hi.atr)))<1e-12
 assert p_hi.qty*p_hi.entry>10000
-print('17/17 PASS')
+# 18 delayed first successful feed cycle with no persisted watermark is still bootstrap-only
+assert m.should_process(None,200,False)==(False,200)
+print('18/18 PASS')
