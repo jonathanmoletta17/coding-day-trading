@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -10,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import urlopen
 
 BASE = os.getenv("MRC_PAPER_INTERNAL_BASE", "http://mrc-cockpit-public.railway.internal:8081").rstrip("/")
-EXPECTED_RELEASE = os.getenv("MRC_EXPECTED_PAPER_RELEASE", "132f3e939c8074dff084f4e56049754f9030af6f").strip()
+EXPECTED_RELEASE = os.getenv("MRC_EXPECTED_PAPER_RELEASE", "de7a2d08a25bd78de66c2c1bd3f72056451ba435").strip()
 POLL_SECONDS = max(30, int(os.getenv("MRC_EVIDENCE_POLL_SECONDS", "60")))
 HISTORY_LIMIT = max(12, min(720, int(os.getenv("MRC_EVIDENCE_HISTORY_LIMIT", "120"))))
 MAX_STALE_SECONDS = max(180, POLL_SECONDS * 3)
@@ -42,17 +43,19 @@ def sample_band(closed: int) -> str:
     return "N50_PLUS"
 
 
-def evaluate(ready: dict, audit: dict, costs: dict, previous: dict | None = None) -> dict:
+def evaluate(ready: dict, audit: dict, costs: dict, evidence: dict, previous: dict | None = None) -> dict:
     p = audit.get("prospective") or {}
     cp = audit.get("cost_policy") or {}
     cs = audit.get("cost_sensitivity") or {}
     storage = audit.get("storage") or {}
     rc = audit.get("risk_controls") or {}
+    eq = evidence.get("evidence_quality") or {}
 
     closed = int(p.get("closed_trades") or 0)
     decisions = int(p.get("decision_events") or 0)
     candidates = int(p.get("breakout_candidates") or 0)
     paper_trades = int(p.get("paper_trades_total") or 0)
+    open_position = bool(p.get("open_position"))
     current_release = audit.get("release_sha")
 
     monotonic = {
@@ -77,18 +80,32 @@ def evaluate(ready: dict, audit: dict, costs: dict, previous: dict | None = None
             if not ok:
                 regression_details.append(f"{field}:{prior}->{current}")
 
+    release_chain_ok = (
+        ready.get("release_sha") == EXPECTED_RELEASE
+        and current_release == EXPECTED_RELEASE
+        and costs.get("release_sha") == EXPECTED_RELEASE
+        and evidence.get("release_sha") == EXPECTED_RELEASE
+    )
+
     operational_checks = {
         "paper_ready": ready.get("ready") is True,
         "btc_ready": (ready.get("checks") or {}).get("BTCUSDT") is True,
         "eth_ready": (ready.get("checks") or {}).get("ETHUSDT") is True,
         "coverage_gap_clear": ready.get("coverage_gap") is None,
         "durable_storage": storage.get("durable") is True and ready.get("durable_storage") is True,
-        "release_pinned": ready.get("release_sha") == EXPECTED_RELEASE == current_release == costs.get("release_sha"),
-        "paper_mode": audit.get("mode") == "PAPER_STAGING",
+        "release_pinned_across_endpoints": release_chain_ok,
+        "paper_mode": audit.get("mode") == "PAPER_STAGING" == evidence.get("mode"),
         "cost_scenarios_present": all(k in cs for k in ("baseline_6bps", "stress_10bps", "stress_15bps")),
         "baseline_6bps_preserved": abs(float(cp.get("paper_baseline_bps") or 0) - 6.0) < 1e-9,
         "demo_calibration_recorded": float(cp.get("demo_calibration_bps") or 0) > 0,
         "one_global_position_enforced": rc.get("one_global_position") == "database_enforced",
+        "evidence_endpoint_read_only": eq.get("read_only") is True,
+        "evidence_integrity_pass": eq.get("integrity_pass") is True and ready.get("evidence_integrity_pass") is True,
+        "evidence_decision_count_matches_audit": int(eq.get("decision_events_total") or 0) == decisions,
+        "evidence_signal_count_matches_audit": int(eq.get("signals_total") or 0) == candidates,
+        "evidence_trade_count_matches_audit": int(eq.get("paper_trades_total") or 0) == paper_trades,
+        "evidence_closed_count_matches_audit": int(eq.get("closed_paper_trades") or 0) == closed,
+        "evidence_open_count_matches_audit": int(eq.get("open_paper_trades") or 0) == (1 if open_position else 0),
         **monotonic,
     }
 
@@ -105,7 +122,7 @@ def evaluate(ready: dict, audit: dict, costs: dict, previous: dict | None = None
         "breakout_candidates": candidates,
         "paper_trades_total": paper_trades,
         "closed_trades": closed,
-        "open_position": bool(p.get("open_position")),
+        "open_position": open_position,
         "wins": p.get("wins"),
         "losses": p.get("losses"),
         "win_rate": p.get("win_rate"),
@@ -120,6 +137,7 @@ def evaluate(ready: dict, audit: dict, costs: dict, previous: dict | None = None
         "daily_realized_pnl_utc": p.get("daily_realized_pnl_utc"),
         "cost_sensitivity": cs,
         "demo_calibration_bps": cp.get("demo_calibration_bps"),
+        "evidence_quality": eq,
     }
 
     r0_block_reasons = [
@@ -132,8 +150,20 @@ def evaluate(ready: dict, audit: dict, costs: dict, previous: dict | None = None
         r0_block_reasons.insert(0, "NO_CLOSED_PROSPECTIVE_PAPER_TRADES")
     if regression_details:
         r0_block_reasons.insert(0, "PROSPECTIVE_COUNTER_REGRESSION_DETECTED")
+    if not eq.get("integrity_pass"):
+        r0_block_reasons.insert(0, "PAPER_EVIDENCE_INTEGRITY_NOT_CLEAN")
     if not all(operational_checks.values()):
         r0_block_reasons.insert(0, "PAPER_OPERATIONAL_GATE_NOT_CLEAN")
+
+    fingerprint_payload = {
+        "paper_release": current_release,
+        "operational_checks": operational_checks,
+        "economic_evidence": economic,
+        "regression_details": regression_details,
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str).encode()
+    ).hexdigest()
 
     return {
         "status": "PASS" if all(operational_checks.values()) else "FAIL",
@@ -142,6 +172,7 @@ def evaluate(ready: dict, audit: dict, costs: dict, previous: dict | None = None
         "paper_release": current_release,
         "collected_at": utc_now(),
         "poll_seconds": POLL_SECONDS,
+        "snapshot_fingerprint_sha256": fingerprint,
         "operational_checks": operational_checks,
         "regression_details": regression_details,
         "economic_evidence": economic,
@@ -162,7 +193,8 @@ def collect(previous: dict | None = None) -> dict:
     ready = fetch("/readyz")
     audit = fetch("/api/audit")
     costs = fetch("/api/cost-sensitivity")
-    return evaluate(ready, audit, costs, previous)
+    evidence = fetch("/api/evidence")
+    return evaluate(ready, audit, costs, evidence, previous)
 
 
 def compact_history_item(result: dict) -> dict:
@@ -172,6 +204,7 @@ def compact_history_item(result: dict) -> dict:
         "collected_at": result.get("collected_at"),
         "status": result.get("status"),
         "paper_release": result.get("paper_release"),
+        "snapshot_fingerprint_sha256": result.get("snapshot_fingerprint_sha256"),
         "decision_events": e.get("decision_events"),
         "breakout_candidates": e.get("breakout_candidates"),
         "paper_trades_total": e.get("paper_trades_total"),
@@ -254,6 +287,7 @@ class H(BaseHTTPRequestHandler):
                 "status": current.get("status"),
                 "phase": current.get("phase"),
                 "snapshot_seq": current.get("snapshot_seq"),
+                "snapshot_fingerprint_sha256": current.get("snapshot_fingerprint_sha256"),
                 "collected_at": collected_at,
                 "snapshot_age_s": round(age, 1) if age is not None else None,
                 "fresh": fresh,
