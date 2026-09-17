@@ -103,6 +103,9 @@ def exit_from_1m(position:dict,bars:list[dict],now_ms:int):
 
 
 def should_process(last_processed:int|None,current_close:int,fresh_boot:bool)->tuple[bool,int]:
-    if last_processed is None and fresh_boot:return False,current_close
-    if last_processed is None:return True,current_close
+    # Safety-first bootstrap rule: if this symbol has no persisted watermark,
+    # the first confirmed close observed is initialization only. This prevents a
+    # symbol whose first feed cycle failed during restart from entering a stale
+    # pre-boot signal on its later first successful cycle.
+    if last_processed is None:return False,current_close
     return current_close>last_processed,max(last_processed,current_close)
