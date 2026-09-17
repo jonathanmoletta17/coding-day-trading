@@ -14,12 +14,16 @@ BASE = os.getenv("MRC_PAPER_INTERNAL_BASE", "http://mrc-cockpit-public.railway.i
 EXPECTED_RELEASE = os.getenv("MRC_EXPECTED_PAPER_RELEASE", "de7a2d08a25bd78de66c2c1bd3f72056451ba435").strip()
 POLL_SECONDS = max(30, int(os.getenv("MRC_EVIDENCE_POLL_SECONDS", "60")))
 HISTORY_LIMIT = max(12, min(720, int(os.getenv("MRC_EVIDENCE_HISTORY_LIMIT", "120"))))
+LOG_HEARTBEAT_POLLS = max(1, int(os.getenv("MRC_EVIDENCE_LOG_HEARTBEAT_POLLS", "60")))
 MAX_STALE_SECONDS = max(180, POLL_SECONDS * 3)
 
 LOCK = threading.Lock()
 RESULT: dict = {"status": "STARTING", "phase": "PROSPECTIVE_EVIDENCE_COLLECTION"}
 HISTORY: deque[dict] = deque(maxlen=HISTORY_LIMIT)
 SNAPSHOT_SEQ = 0
+LAST_LOGGED_FINGERPRINT: str | None = None
+LAST_LOGGED_STATUS: str | None = None
+LAST_LOGGED_SEQ = 0
 
 
 def utc_now() -> str:
@@ -215,6 +219,45 @@ def compact_history_item(result: dict) -> dict:
     }
 
 
+def log_mode(result: dict, last_fingerprint: str | None, last_status: str | None, seq_since_log: int) -> str:
+    if result.get("error") or result.get("regression_details"):
+        return "FULL"
+    if last_fingerprint is None or result.get("snapshot_fingerprint_sha256") != last_fingerprint:
+        return "FULL"
+    if last_status is None or result.get("status") != last_status:
+        return "FULL"
+    if seq_since_log >= LOG_HEARTBEAT_POLLS:
+        return "HEARTBEAT"
+    return "NONE"
+
+
+def emit_log(result: dict) -> None:
+    global LAST_LOGGED_FINGERPRINT, LAST_LOGGED_STATUS, LAST_LOGGED_SEQ
+    mode = log_mode(result, LAST_LOGGED_FINGERPRINT, LAST_LOGGED_STATUS, int(result.get("snapshot_seq") or 0) - LAST_LOGGED_SEQ)
+    if mode == "NONE":
+        return
+    if mode == "FULL":
+        print("FORWARD_PAPER_EVIDENCE_GATE=" + json.dumps(result, separators=(",", ":"), ensure_ascii=False), flush=True)
+    else:
+        e = result.get("economic_evidence") or {}
+        compact = {
+            "snapshot_seq": result.get("snapshot_seq"),
+            "status": result.get("status"),
+            "paper_release": result.get("paper_release"),
+            "fingerprint": result.get("snapshot_fingerprint_sha256"),
+            "decision_events": e.get("decision_events"),
+            "breakout_candidates": e.get("breakout_candidates"),
+            "paper_trades_total": e.get("paper_trades_total"),
+            "closed_trades": e.get("closed_trades"),
+            "sample_band": e.get("sample_band"),
+            "r0": (result.get("r0") or {}).get("status"),
+        }
+        print("FORWARD_PAPER_EVIDENCE_HEARTBEAT=" + json.dumps(compact, separators=(",", ":"), ensure_ascii=False), flush=True)
+    LAST_LOGGED_FINGERPRINT = result.get("snapshot_fingerprint_sha256")
+    LAST_LOGGED_STATUS = result.get("status")
+    LAST_LOGGED_SEQ = int(result.get("snapshot_seq") or 0)
+
+
 def refresh_once() -> dict:
     global RESULT, SNAPSHOT_SEQ
     with LOCK:
@@ -242,7 +285,7 @@ def refresh_once() -> dict:
         out["snapshot_seq"] = SNAPSHOT_SEQ
         RESULT = out
         HISTORY.append(compact_history_item(out))
-    print("FORWARD_PAPER_EVIDENCE_GATE=" + json.dumps(out, separators=(",", ":"), ensure_ascii=False), flush=True)
+    emit_log(out)
     return out
 
 
