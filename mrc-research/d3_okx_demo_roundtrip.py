@@ -16,7 +16,7 @@ import httpx
 
 BASE = "https://openapi.okx.com"
 INST = "BTC-USDT-SWAP"
-QTY = Decimal("0.01")  # minimum contract-size execution plumbing test
+QTY = Decimal("0.01")
 MAX_NOTIONAL_USDT = Decimal("20")
 EXPECTED_LABEL = "MRC-SLOW-DEMO-GLOBAL"
 ARM = "DEMO_BTC_MIN_ROUNDTRIP_V1"
@@ -77,8 +77,12 @@ class Client:
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
         ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         r = await self.h.post(path, content=body.encode(), headers=self.headers(ts, "POST", path, body))
-        r.raise_for_status()
-        j = r.json()
+        try:
+            j = r.json()
+        except Exception:
+            j = {}
+        if r.status_code >= 400:
+            raise RuntimeError(f"OKX_POST_HTTP {r.status_code} {j.get('code')} {j.get('msg')}")
         if j.get("code") != "0":
             raise RuntimeError(f"OKX_POST_ERROR {j.get('code')} {j.get('msg')}")
         rows = j.get("data") or []
