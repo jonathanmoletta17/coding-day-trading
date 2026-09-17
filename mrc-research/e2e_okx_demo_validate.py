@@ -46,7 +46,7 @@ class Client:
         self.creds_present = bool(self.key and self.secret and self.passphrase)
         if not self.creds_present:
             raise RuntimeError("DEMO_CREDENTIALS_MISSING")
-        self.h = httpx.AsyncClient(base_url=BASE, timeout=20, headers={"User-Agent": "MRC-OKX-Demo-E2E/1.0"})
+        self.h = httpx.AsyncClient(base_url=BASE, timeout=20, headers={"User-Agent": "MRC-OKX-Demo-E2E/2.0"})
 
     async def public_get(self, path: str, params: dict | None = None):
         r = await self.h.get(path, params=params or {})
@@ -146,8 +146,8 @@ async def validate() -> dict:
             "targets_live": all(x["state"] == "live" for x in target_rows),
             "contracts_conversion_verified": all(Decimal(x["sample_contracts"]) > 0 for x in target_rows),
             "demo_header_required": True,
-            "order_submission_performed": False,
-            "real_money_execution_enabled": False,
+            "order_submission_blocked": True,
+            "real_money_execution_blocked": True,
         }
 
         out = {
@@ -163,6 +163,8 @@ async def validate() -> dict:
             "private_swap_count": len(swaps),
             "targets": target_rows,
             "gates": gates,
+            "order_submission_performed": False,
+            "real_money_execution_enabled": False,
         }
         print("OKX_DEMO_E2E=" + json.dumps(out, separators=(",", ":"), ensure_ascii=False), flush=True)
         if out["status"] != "PASS":
