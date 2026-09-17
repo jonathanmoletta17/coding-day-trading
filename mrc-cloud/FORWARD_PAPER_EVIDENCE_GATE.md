@@ -24,18 +24,19 @@ Current gate implementation lineage:
 - continuous refresh + monotonic regression checks: `19a12088eb1df7375eb884337a4188f811874889`
 - integrity-bound gate: `c1088091c00959dc297b830fe0587033e9f05bf4`
 - integrity test suite: `0ae1955faedf7f30db0867c7b50c32add5858a3a`
+- change-aware logging: `56ffb98ff9caacca3246c87392f86577f0868a9c`
+- automatic linked-trade review gate: `a9f7fb7ba5e018a07b66846aee8e8c5b32c7a13b`
+- final gate test suite: `71320f3a0e169d802da00935b3faf8d804816b0e`
 
 Current expected PAPER release:
 
-`de7a2d08a25bd78de66c2c1bd3f72056451ba435`
+`119a1e9a88da76ff31130804340bb0655c97d990`
 
-This PAPER release is observability-only relative to the preceding V1 release. It adds prospective evidence-quality reporting without changing strategy rules, sizing, exits or the official 6 bps baseline.
+This PAPER release is observability-only relative to the frozen V1 strategy. It adds prospective evidence-quality reporting and linked closed-trade reconstruction without changing strategy rules, sizing, exits or the official 6 bps baseline.
 
 ## Continuous behavior
 
-The gate no longer takes only one boot-time snapshot.
-
-It refreshes the PAPER source periodically and exposes:
+The gate refreshes the PAPER source every 60 seconds by default and exposes:
 
 - `/healthz` — freshness + gate status
 - `/snapshot` — current full evidence snapshot
@@ -44,6 +45,15 @@ It refreshes the PAPER source periodically and exposes:
 The in-memory history is not treated as the source of truth. Every snapshot is recomputed from the durable PAPER source.
 
 Each successful snapshot includes a deterministic SHA-256 fingerprint over the release, operational checks, economic evidence and regression state.
+
+Logging is change-aware:
+
+- full snapshot on first boot;
+- full snapshot on fingerprint/status change, regression or error;
+- unchanged frequent polls remain silent;
+- compact heartbeat is emitted periodically.
+
+Polling frequency therefore remains high enough to detect the first signal/trade promptly without producing a full JSON log every minute.
 
 ## Operational checks
 
@@ -68,6 +78,10 @@ The gate requires all of these to be true before its healthcheck is green:
 - closed trade count agrees between audit and evidence endpoints
 - open-position state agrees with the number of open PAPER trades
 - decision/signal/trade/closed-trade counters do not regress inside the same pinned release
+- linked latest-closed-trade review is read only
+- latest-closed-trade review state agrees with `closed_trades`
+- after at least one closed trade, `trade -> signal -> decision` link integrity must pass
+- after at least one closed trade, individual 6/10/15 bps repricing must be available
 
 A PASS here means the prospective evidence collector is operationally coherent.
 
@@ -98,9 +112,50 @@ A latest hourly close can be temporarily unpaired while BTC and ETH are being wr
 
 Coverage ratio refers only to the period between the first and last observed decision for a symbol; it does not claim observation before collection began.
 
+## Linked closed-trade reconstruction
+
+The active PAPER release also exposes:
+
+`/api/latest-closed-trade-review`
+
+When there is no closed prospective PAPER trade, it must return:
+
+- `available=false`
+- `read_only=true`
+- `reason=NO_CLOSED_PROSPECTIVE_PAPER_TRADE`
+
+When a closed trade exists, it reconstructs the latest closed trade directly from the durable database through:
+
+`trade -> signal_id -> signal -> signal_ms -> decision_event`
+
+It also reprices the exact same trade under 6/10/15 bps without mutation.
+
+For the bundle to be considered clean, the gate requires:
+
+- signal exists
+- entry decision at the signal close exists
+- trade/signal IDs match
+- symbol matches
+- side matches
+- baseline 6 bps repricing reproduces persisted `pnl` and `r_net`
+- 10 bps and 15 bps scenarios are available
+
+This prevents a 72h-held trade from losing its entry provenance merely because the entry decision is no longer among the most recent 20 decisions.
+
 ## Current verified state — 2026-09-17
 
-The first integrity-bound production snapshot after promotion returned PASS.
+The final production gate passed **15/15 tests** and then reconciled the live PAPER corpus successfully.
+
+### Active release and durability
+
+- active PAPER SHA: `119a1e9a88da76ff31130804340bb0655c97d990`
+- core engine boot tests: `24/24 PASS`
+- cost sensitivity: PASS / non-mutating
+- evidence tests: `7/7 PASS`
+- linked-trade review tests: PASS
+- durability boot count: `15`
+- durability probe ID unchanged: `1d586d7c-2190-4d10-8cef-df931f6fe1d4`
+- SQLite path unchanged: `/data/mrc_slow_staging_v3.sqlite3`
 
 ### Corpus
 
@@ -143,7 +198,31 @@ Cross-symbol integrity:
 - trades missing signals: `0`
 - integrity pass: `true`
 
-This matters because the current zero-trade sample is now distinguishable from a broken collector: the system observed all nine hourly BTC/ETH decision pairs and the frozen strategy did not produce a qualifying trade.
+Latest closed-trade review:
+
+- `available=false`
+- `read_only=true`
+- `reason=NO_CLOSED_PROSPECTIVE_PAPER_TRADE`
+- matches `closed_trades=0`: true
+
+This matters because the current zero-trade sample is distinguishable from a broken collector: the system observed all nine hourly BTC/ETH decision pairs and the frozen strategy did not produce a qualifying trade.
+
+## Current gate snapshot
+
+Final validated snapshot fingerprint after the linked-review integration:
+
+`0fe91562c269a321321798fd2f2e51d48ae5e8cc0907870e43ce7982103090c0`
+
+The fingerprint is an audit identity for snapshot content, not a cryptographic signature or authorization token.
+
+All operational checks were true, including:
+
+- `latest_closed_trade_review_read_only=true`
+- `latest_closed_trade_review_matches_sample_state=true`
+- `latest_closed_trade_review_link_integrity=true`
+- `latest_closed_trade_review_cost_scenarios=true`
+
+The latter two are vacuously true while no trade has closed; once `closed_trades>0`, they require an actual clean linked review.
 
 ## Current economic state
 
@@ -197,6 +276,7 @@ As trades occur naturally under the frozen V1 rules, monitor:
 - total PAPER trades
 - closed PAPER trades
 - open-position state
+- linked latest-trade integrity
 - win rate
 - expectancy net R
 - total net R
@@ -228,15 +308,18 @@ Do:
 - preserve wrong-direction/no-breakout/blocked decisions as evidence
 - keep release SHA and cost policy visible in every audit
 - separate modeled costs from observed Demo execution costs
+- require linked provenance for every closed trade review
 - investigate discrepancies before changing V1
 - require a separate, versioned research decision before any V2 parameter change
 
 ## Current verdict
 
 - Demo execution engineering: **D0–D4 PASS**
-- PAPER release: **`de7a2d08...` ACTIVE**
+- PAPER release: **`119a1e9a...` ACTIVE**
 - PAPER collection infrastructure: **PASS**
 - PAPER evidence integrity: **PASS**
+- Forward evidence gate tests: **15/15 PASS**
 - Prospectively observed hourly coverage: **18/18 symbol-events across 9 hourly pairs**
+- Latest closed-trade review state: **PASS / correctly unavailable because closed=0**
 - Prospective economic sample: **N0 / COLLECTING**
 - Real money: **BLOCKED**
