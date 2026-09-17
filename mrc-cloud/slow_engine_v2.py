@@ -80,7 +80,7 @@ def evaluate(symbol:str,h1_rows:list,h4_rows:list,bid:float,ask:float,now_ms:int
     if not entry or not a:ctx['state']='DATA_ERROR';return ctx,None
     age=max(0,(now_ms-sig['ct'])/MINUTE);chase=abs(entry-sig['c'])/a;sd=STOP_ATR*a
     stop=entry-sd if side=='LONG' else entry+sd;target=entry+TARGET_R*sd if side=='LONG' else entry-TARGET_R*sd
-    risk=equity*risk_pct;qty=min(risk/sd if sd else 0,equity/entry if entry else 0);decision=side;state='EXECUTABLE';why=[]
+    risk=equity*risk_pct;qty=risk/sd if sd else 0.0;decision=side;state='EXECUTABLE';why=[]
     if age>MAX_AGE_MIN:decision='NO_TRADE';state='TOO_EXTENDED';why.append('stale')
     if chase>MAX_CHASE_ATR:decision='NO_TRADE';state='TOO_EXTENDED';why.append('chase')
     if slot_open:decision='NO_TRADE';state='BLOCKED_POSITION_OPEN';why.append('slot')
