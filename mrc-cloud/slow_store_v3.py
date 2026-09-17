@@ -2,27 +2,29 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 try:
     import psycopg
     from psycopg.rows import dict_row
-except Exception:  # psycopg is optional when SQLite fallback is used
+except Exception:
     psycopg = None
     dict_row = None
 
 
 class Store:
-    """Small durable state store.
+    """Durable PAPER state + prospective audit store.
 
-    Uses PostgreSQL when database_url is provided; otherwise SQLite.
-    SQL is intentionally limited to constructs supported by both backends.
+    PostgreSQL is used when DATABASE_URL is provided; otherwise SQLite.
+    The SQL surface is intentionally kept portable between both backends.
     """
 
     def __init__(self, sqlite_path: str, database_url: str = ""):
         self.database_url = (database_url or "").strip()
         self.backend = "postgres" if self.database_url else "sqlite"
+        self.sqlite_path = sqlite_path
 
         if self.backend == "postgres":
             if psycopg is None:
@@ -90,6 +92,27 @@ class Store:
               r_net DOUBLE PRECISION
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS decision_events(
+              event_id TEXT PRIMARY KEY,
+              symbol TEXT NOT NULL,
+              close_ms BIGINT NOT NULL,
+              decided_at TEXT NOT NULL,
+              state TEXT,
+              trend TEXT,
+              breakout TEXT,
+              action TEXT,
+              price DOUBLE PRECISION,
+              ema20_4h DOUBLE PRECISION,
+              ema50_4h DOUBLE PRECISION,
+              don_hi DOUBLE PRECISION,
+              don_lo DOUBLE PRECISION,
+              atr DOUBLE PRECISION,
+              candidate_side TEXT,
+              candidate_decision TEXT,
+              payload TEXT
+            )
+            """,
         ]
         for stmt in stmts:
             self._exec(stmt)
@@ -148,6 +171,34 @@ class Store:
         self._commit()
         return cur.rowcount == 1
 
+    def record_decision(self, strategy: str, symbol: str, close_ms: int, decided_at: str,
+                        ctx: dict, candidate=None) -> bool:
+        event_id = f"{strategy}:{symbol}:{int(close_ms)}"
+        action = candidate.decision if candidate is not None else ctx.get("state", "UNKNOWN")
+        payload = {
+            "context": ctx,
+            "candidate": candidate.__dict__ if candidate is not None else None,
+        }
+        cur = self._exec(
+            """
+            INSERT INTO decision_events(
+              event_id,symbol,close_ms,decided_at,state,trend,breakout,action,price,
+              ema20_4h,ema50_4h,don_hi,don_lo,atr,candidate_side,candidate_decision,payload
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(event_id) DO NOTHING
+            """,
+            (
+                event_id, symbol, int(close_ms), decided_at,
+                ctx.get("state"), ctx.get("trend"), ctx.get("breakout"), action,
+                ctx.get("price"), ctx.get("ema20_4h"), ctx.get("ema50_4h"),
+                ctx.get("don_hi"), ctx.get("don_lo"), ctx.get("atr"),
+                getattr(candidate, "side", None), getattr(candidate, "decision", None),
+                json.dumps(payload),
+            ),
+        )
+        self._commit()
+        return cur.rowcount == 1
+
     def open_position(self, p, now_ms: int) -> bool:
         if self.open_trade():
             return False
@@ -177,7 +228,6 @@ class Store:
         self._commit()
         return cur.rowcount == 1
 
-    # Compatibility alias while staging code migrates.
     def open(self, p, now_ms: int) -> bool:
         return self.open_position(p, now_ms)
 
@@ -221,6 +271,18 @@ class Store:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def recent_decisions(self, n: int = 20):
+        rows = self._exec(
+            "SELECT * FROM decision_events ORDER BY close_ms DESC, symbol ASC LIMIT ?",
+            (n,),
+        ).fetchall()
+        out=[]
+        for r in rows:
+            d=dict(r)
+            d.pop("payload", None)
+            out.append(d)
+        return out
+
     def signal_count(self) -> int:
         r = self._exec("SELECT COUNT(*) AS n FROM signals").fetchone()
         return int(r["n"] if r else 0)
@@ -228,3 +290,61 @@ class Store:
     def trade_count(self) -> int:
         r = self._exec("SELECT COUNT(*) AS n FROM trades").fetchone()
         return int(r["n"] if r else 0)
+
+    def decision_count(self, symbol: str | None = None) -> int:
+        if symbol:
+            r=self._exec("SELECT COUNT(*) AS n FROM decision_events WHERE symbol=?",(symbol,)).fetchone()
+        else:
+            r=self._exec("SELECT COUNT(*) AS n FROM decision_events").fetchone()
+        return int(r["n"] if r else 0)
+
+    def last_decision(self, symbol: str):
+        r=self._exec(
+            "SELECT close_ms,decided_at FROM decision_events WHERE symbol=? ORDER BY close_ms DESC LIMIT 1",
+            (symbol,),
+        ).fetchone()
+        return dict(r) if r else None
+
+    def daily_realized_pnl(self, now_ms: int) -> float:
+        day=datetime.fromtimestamp(now_ms/1000,tz=timezone.utc).date()
+        rows=self._exec("SELECT closed_ms,pnl FROM trades WHERE outcome!='OPEN' AND closed_ms IS NOT NULL").fetchall()
+        total=0.0
+        for r in rows:
+            if datetime.fromtimestamp(int(r["closed_ms"])/1000,tz=timezone.utc).date()==day:
+                total += float(r["pnl"] or 0)
+        return total
+
+    def audit_summary(self, cost: float, start_equity: float, now_ms: int) -> dict:
+        rows=[dict(r) for r in self._exec(
+            "SELECT * FROM trades WHERE outcome!='OPEN' AND closed_ms IS NOT NULL ORDER BY closed_ms,trade_id"
+        ).fetchall()]
+        rs=[]; cost_rs=[]; gross_rs=[]; total_pnl=0.0; wins=0
+        cumulative=0.0; peak=0.0; max_dd=0.0
+        for t in rows:
+            r=float(t.get("r_net") or 0); rs.append(r); total_pnl+=float(t.get("pnl") or 0)
+            if r>0:wins+=1
+            risk=float(t.get("risk") or 0); qty=float(t.get("qty") or 0)
+            fees=(float(t.get("entry") or 0)+float(t.get("exit") or 0))*qty*(cost/2)
+            cr=fees/risk if risk else 0.0; cost_rs.append(cr); gross_rs.append(r+cr)
+            cumulative+=r; peak=max(peak,cumulative); max_dd=max(max_dd,peak-cumulative)
+        pos=sum(x for x in rs if x>0); neg=-sum(x for x in rs if x<0)
+        n=len(rs)
+        return {
+            "decision_events":self.decision_count(),
+            "breakout_candidates":self.signal_count(),
+            "paper_trades_total":self.trade_count(),
+            "closed_trades":n,
+            "open_position":bool(self.open_trade()),
+            "wins":wins,
+            "losses":n-wins,
+            "win_rate":wins/n if n else None,
+            "expectancy_net_R":sum(rs)/n if n else None,
+            "total_net_R":sum(rs) if n else 0.0,
+            "profit_factor_net":pos/neg if neg>0 else None,
+            "max_drawdown_R":-max_dd,
+            "avg_cost_R":sum(cost_rs)/n if n else None,
+            "avg_gross_R":sum(gross_rs)/n if n else None,
+            "realized_pnl":total_pnl,
+            "equity":start_equity+total_pnl,
+            "daily_realized_pnl_utc":self.daily_realized_pnl(now_ms),
+        }
