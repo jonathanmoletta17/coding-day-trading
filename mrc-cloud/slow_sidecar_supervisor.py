@@ -5,6 +5,13 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.request
+
+
+SLOW_HEALTH_URL = "http://127.0.0.1:8081/healthz"
+HEALTH_STARTUP_GRACE_S = 30
+HEALTH_INTERVAL_S = 15
+HEALTH_FAILURE_LIMIT = 3
 
 
 def main() -> int:
@@ -23,6 +30,8 @@ def main() -> int:
 
     children = (slow, public)
     stopping = False
+    slow_health_failures = 0
+    next_slow_health = time.time() + HEALTH_STARTUP_GRACE_S
 
     def stop_all(signum=None, frame=None):
         nonlocal stopping
@@ -47,6 +56,12 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, stop_all)
     signal.signal(signal.SIGINT, stop_all)
+    print(
+        f"SUPERVISOR_STARTED slow_health={SLOW_HEALTH_URL} "
+        f"grace_s={HEALTH_STARTUP_GRACE_S} interval_s={HEALTH_INTERVAL_S} "
+        f"failure_limit={HEALTH_FAILURE_LIMIT}",
+        flush=True,
+    )
 
     try:
         while True:
@@ -59,6 +74,30 @@ def main() -> int:
                 )
                 stop_all()
                 return 1
+
+            now = time.time()
+            if now >= next_slow_health:
+                try:
+                    with urllib.request.urlopen(SLOW_HEALTH_URL, timeout=5) as r:
+                        if int(getattr(r, "status", 0)) != 200:
+                            raise RuntimeError(f"HTTP {getattr(r, 'status', None)}")
+                        r.read(256)
+                    if slow_health_failures:
+                        print("SUPERVISOR_SLOW_HEALTH_RECOVERED", flush=True)
+                    slow_health_failures = 0
+                except Exception as exc:
+                    slow_health_failures += 1
+                    print(
+                        f"SUPERVISOR_SLOW_HEALTH_FAIL count={slow_health_failures} "
+                        f"error={type(exc).__name__}:{exc}",
+                        flush=True,
+                    )
+                    if slow_health_failures >= HEALTH_FAILURE_LIMIT:
+                        print("SUPERVISOR_SLOW_UNHEALTHY_RESTART", flush=True)
+                        stop_all()
+                        return 1
+                next_slow_health = now + HEALTH_INTERVAL_S
+
             time.sleep(1)
     finally:
         stop_all()
