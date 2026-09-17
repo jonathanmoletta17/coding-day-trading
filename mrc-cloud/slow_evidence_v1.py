@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import Counter
+import json
 from typing import Iterable
 
 
@@ -35,12 +35,17 @@ def _trade_group_counts(db, field: str) -> dict[str, int]:
     return {str(r["k"] if r["k"] is not None else "NULL"): int(r["n"]) for r in rows}
 
 
-def evidence_summary(db, symbols: Iterable[str], hour_ms: int) -> dict:
-    """Build a read-only integrity/coverage summary from prospective PAPER state.
+def _loads(raw):
+    if raw in (None, ""):
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {"parse_error": True, "raw": str(raw)}
 
-    This function deliberately issues SELECT statements only. It is designed to be
-    safe to call from observability endpoints without mutating strategy state.
-    """
+
+def evidence_summary(db, symbols: Iterable[str], hour_ms: int) -> dict:
+    """Build a read-only integrity/coverage summary from prospective PAPER state."""
     syms = tuple(symbols)
     if not syms:
         raise ValueError("SYMBOLS_REQUIRED")
@@ -153,5 +158,94 @@ def evidence_summary(db, symbols: Iterable[str], hour_ms: int) -> dict:
             "signals_without_trade": "informational_not_error; slot/reentry/risk gates may legitimately block a candidate",
             "latest_unpaired_decision_closes": "may be transient while the current hourly pair is being written; historical unpaired closes are the fail condition",
             "coverage_ratio": "measures continuity only between each symbol's first and last observed decision close; it does not claim coverage before collection began",
+        },
+    }
+
+
+def latest_closed_trade_review(db, cost_scenarios: dict[str, float]) -> dict:
+    """Reconstruct the newest closed PAPER trade from durable linked records, read only."""
+    row = db._exec(
+        "SELECT * FROM trades WHERE outcome!='OPEN' AND closed_ms IS NOT NULL "
+        "ORDER BY closed_ms DESC, trade_id DESC LIMIT 1"
+    ).fetchone()
+    if not row:
+        return {
+            "available": False,
+            "read_only": True,
+            "reason": "NO_CLOSED_PROSPECTIVE_PAPER_TRADE",
+        }
+
+    trade = dict(row)
+    signal_row = db._exec("SELECT * FROM signals WHERE signal_id=?", (trade.get("signal_id"),)).fetchone()
+    signal = dict(signal_row) if signal_row else None
+    signal_payload = _loads(signal.get("payload")) if signal else None
+    signal_ms = int(signal["signal_ms"]) if signal and signal.get("signal_ms") is not None else None
+
+    decision_row = None
+    if signal_ms is not None:
+        decision_row = db._exec(
+            "SELECT * FROM decision_events WHERE symbol=? AND close_ms=? ORDER BY decided_at LIMIT 1",
+            (trade.get("symbol"), signal_ms),
+        ).fetchone()
+    decision = dict(decision_row) if decision_row else None
+    decision_payload = _loads(decision.pop("payload", None)) if decision else None
+
+    side_mult = 1.0 if trade.get("side") == "LONG" else -1.0
+    entry = float(trade.get("entry") or 0)
+    exit_px = float(trade.get("exit") or 0)
+    qty = float(trade.get("qty") or 0)
+    risk = float(trade.get("risk") or 0)
+    gross_pnl = (exit_px - entry) * side_mult * qty
+    gross_r = gross_pnl / risk if risk else None
+
+    scenarios = {}
+    for name, raw_cost in cost_scenarios.items():
+        cost = float(raw_cost)
+        modeled_cost = (entry + exit_px) * qty * (cost / 2)
+        net_pnl = gross_pnl - modeled_cost
+        scenarios[str(name)] = {
+            "roundtrip_cost_rate": cost,
+            "roundtrip_cost_bps": cost * 10000.0,
+            "gross_pnl": gross_pnl,
+            "modeled_cost": modeled_cost,
+            "net_pnl": net_pnl,
+            "gross_R": gross_r,
+            "cost_R": modeled_cost / risk if risk else None,
+            "net_R": net_pnl / risk if risk else None,
+        }
+
+    stored_pnl = float(trade.get("pnl") or 0)
+    stored_r = float(trade.get("r_net") or 0)
+    baseline = scenarios.get("baseline_6bps")
+    baseline_matches_stored = bool(
+        baseline is not None
+        and abs(float(baseline["net_pnl"]) - stored_pnl) < 1e-8
+        and abs(float(baseline["net_R"]) - stored_r) < 1e-8
+    )
+
+    links = {
+        "signal_exists": signal is not None,
+        "decision_exists_at_signal_close": decision is not None,
+        "trade_signal_id_matches_signal": bool(signal and trade.get("signal_id") == signal.get("signal_id")),
+        "trade_symbol_matches_signal": bool(signal and trade.get("symbol") == signal.get("symbol")),
+        "trade_side_matches_signal": bool(signal and trade.get("side") == signal.get("side")),
+        "baseline_6bps_reprice_matches_stored": baseline_matches_stored,
+    }
+
+    return {
+        "available": True,
+        "read_only": True,
+        "trade": trade,
+        "signal": signal,
+        "signal_payload": signal_payload,
+        "decision": decision,
+        "decision_payload": decision_payload,
+        "links": links,
+        "link_integrity_pass": all(links.values()),
+        "cost_scenarios": scenarios,
+        "interpretation": {
+            "role": "first/latest closed trade reconstruction; descriptive and audit only",
+            "parameter_retuning_authorized": False,
+            "real_money_promotion_authorized": False,
         },
     }
