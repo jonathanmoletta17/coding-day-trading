@@ -1,11 +1,13 @@
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from slow_evidence_v1 import evidence_summary
+from slow_evidence_v1 import evidence_summary, latest_closed_trade_review
 from slow_store_v3 import Store
 
 HOUR = 3_600_000
 STRATEGY = "SLOW_TREND_BREAKOUT_V1"
+COSTS = {"baseline_6bps": 0.0006, "stress_10bps": 0.0010, "stress_15bps": 0.0015}
 
 
 def ctx(state="WAIT_BREAKOUT", trend="DOWN", breakout="NONE"):
@@ -74,10 +76,8 @@ def test_historical_gap_and_unpaired_close_fail_integrity():
     with TemporaryDirectory() as td:
         db = Store(str(Path(td) / "evidence.sqlite3"))
         base = 1_800_000_000_000
-        # Hour 0 paired.
         for symbol in ("BTCUSDT", "ETHUSDT"):
             db.record_decision(STRATEGY, symbol, base, "2026-09-17T00:00:00+00:00", ctx(), None)
-        # Hour 1 BTC only, and hour 2 paired. Hour 1 becomes a historical unpaired close.
         db.record_decision(STRATEGY, "BTCUSDT", base + HOUR, "2026-09-17T01:00:00+00:00", ctx(), None)
         for symbol in ("BTCUSDT", "ETHUSDT"):
             db.record_decision(STRATEGY, symbol, base + 2 * HOUR, "2026-09-17T02:00:00+00:00", ctx(), None)
@@ -120,6 +120,68 @@ def test_trade_without_signal_is_detected():
         db.close_conn()
 
 
+def test_latest_closed_trade_review_reports_unavailable_without_closed_trade():
+    with TemporaryDirectory() as td:
+        db = Store(str(Path(td) / "evidence.sqlite3"))
+        before = counts(db)
+        out = latest_closed_trade_review(db, COSTS)
+        after = counts(db)
+        assert before == after
+        assert out == {
+            "available": False,
+            "read_only": True,
+            "reason": "NO_CLOSED_PROSPECTIVE_PAPER_TRADE",
+        }
+        db.close_conn()
+
+
+def test_latest_closed_trade_review_links_signal_decision_and_reprices_costs():
+    with TemporaryDirectory() as td:
+        db = Store(str(Path(td) / "evidence.sqlite3"))
+        signal_ms = 1_800_000_000_000
+        signal_id = "sig123"
+        signal_payload = {
+            "symbol": "BTCUSDT", "signal_id": signal_id, "side": "LONG", "decision": "LONG",
+            "signal_ms": signal_ms, "entry": 100.0, "stop": 98.5, "target": 103.0,
+            "atr": 1.0, "risk_usdt": 25.0, "qty": 2.0,
+        }
+        db._exec(
+            "INSERT INTO signals(signal_id,symbol,side,decision,signal_ms,payload,created_at) VALUES(?,?,?,?,?,?,?)",
+            (signal_id, "BTCUSDT", "LONG", "LONG", signal_ms, json.dumps(signal_payload), "2026-09-17T00:00:01+00:00"),
+        )
+        decision_ctx = ctx(state="EXECUTABLE", trend="UP", breakout="LONG")
+        db.record_decision(STRATEGY, "BTCUSDT", signal_ms, "2026-09-17T00:00:01+00:00", decision_ctx, None, action_override="PAPER_OPEN")
+        entry, exit_px, qty, risk = 100.0, 103.0, 2.0, 25.0
+        gross = (exit_px - entry) * qty
+        baseline_cost = (entry + exit_px) * qty * (0.0006 / 2)
+        baseline_pnl = gross - baseline_cost
+        baseline_r = baseline_pnl / risk
+        db._exec(
+            "INSERT INTO trades(trade_id,signal_id,symbol,side,entry,stop,target,qty,risk,opened_ms,last_check_ms,closed_ms,exit,outcome,pnl,r_net) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("slow_sig123", signal_id, "BTCUSDT", "LONG", entry, 98.5, 103.0, qty, risk,
+             signal_ms + 1000, signal_ms + 2 * HOUR, signal_ms + 2 * HOUR, exit_px, "TARGET", baseline_pnl, baseline_r),
+        )
+        db._commit()
+        before = counts(db)
+        out = latest_closed_trade_review(db, COSTS)
+        after = counts(db)
+        assert before == after
+        assert out["available"] is True
+        assert out["read_only"] is True
+        assert out["trade"]["trade_id"] == "slow_sig123"
+        assert out["signal"]["signal_id"] == signal_id
+        assert out["signal_payload"]["entry"] == 100.0
+        assert out["decision"]["close_ms"] == signal_ms
+        assert out["link_integrity_pass"] is True
+        assert out["links"]["baseline_6bps_reprice_matches_stored"] is True
+        assert out["cost_scenarios"]["baseline_6bps"]["net_R"] == baseline_r
+        assert out["cost_scenarios"]["stress_15bps"]["net_R"] < baseline_r
+        assert out["interpretation"]["parameter_retuning_authorized"] is False
+        assert out["interpretation"]["real_money_promotion_authorized"] is False
+        db.close_conn()
+
+
 def run_all():
     tests = [
         test_empty_is_valid_read_only,
@@ -127,10 +189,12 @@ def run_all():
         test_historical_gap_and_unpaired_close_fail_integrity,
         test_latest_unpaired_close_is_reported_but_not_historical_failure,
         test_trade_without_signal_is_detected,
+        test_latest_closed_trade_review_reports_unavailable_without_closed_trade,
+        test_latest_closed_trade_review_links_signal_decision_and_reprices_costs,
     ]
     for fn in tests:
         fn()
-    print(f"SLOW_EVIDENCE_TEST=PASS cases={len(tests)} read_only=true")
+    print(f"SLOW_EVIDENCE_TEST=PASS cases={len(tests)} read_only=true linked_trade_review=true")
 
 
 if __name__ == "__main__":
