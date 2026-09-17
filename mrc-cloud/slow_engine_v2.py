@@ -40,6 +40,24 @@ def confirmed(rows:list[list[Any]],duration_ms:int,cutoff_ms:int)->list[dict]:
     return sorted(out,key=lambda x:x['ot'])
 
 
+def first_full_minute_open(opened_ms:int)->int:
+    """First 1m bar open that is not contaminated by time before the PAPER entry."""
+    x=int(opened_ms)
+    return ((x+MINUTE-1)//MINUTE)*MINUTE
+
+
+def current_stop_from_ticker(position:dict,bid:float,ask:float,now_ms:int):
+    """Current-price STOP safety check only; TARGET waits for a closed causal 1m bar.
+
+    This intentionally avoids declaring a target from an incomplete minute where a
+    later stop touch could make STOP win under the conservative ambiguity rule.
+    """
+    side=position['side']; stop=f(position['stop'])
+    if side=='LONG' and bid and bid<=stop:return 'STOP',stop,int(now_ms)
+    if side=='SHORT' and ask and ask>=stop:return 'STOP',stop,int(now_ms)
+    return None
+
+
 @dataclass(frozen=True)
 class Candidate:
     symbol:str; signal_id:str; side:str; decision:str; signal_ms:int; breakout_close:float
@@ -49,21 +67,20 @@ class Candidate:
 
 def evaluate(symbol:str,h1_rows:list,h4_rows:list,bid:float,ask:float,now_ms:int,equity:float,risk_pct:float=.0025,
              slot_open:bool=False,reentry_blocked:bool=False,daily_locked:bool=False):
-    h1=confirmed(h1_rows,HOUR,now_ms)
-    h4=confirmed(h4_rows,FOUR_HOUR,now_ms)[-120:]
+    h1=confirmed(h1_rows,HOUR,now_ms);h4=confirmed(h4_rows,FOUR_HOUR,now_ms)[-120:]
     if len(h1)<40 or len(h4)<50:return {'state':'DATA_ERROR','ready':False},None
-    sig=h1[-1]; prev=h1[-21:-1]; hi=max(x['h'] for x in prev); lo=min(x['l'] for x in prev); a=atr_wilder(h1[-40:])
-    e20=ema([x['c'] for x in h4],20); e50=ema([x['c'] for x in h4],50); trend='UP' if e20>e50 else 'DOWN' if e20<e50 else 'NEUTRAL'
-    side='LONG' if sig['c']>hi else 'SHORT' if sig['c']<lo else 'NONE'; price=(bid+ask)/2 if bid and ask else 0.0
+    sig=h1[-1];prev=h1[-21:-1];hi=max(x['h'] for x in prev);lo=min(x['l'] for x in prev);a=atr_wilder(h1[-40:])
+    e20=ema([x['c'] for x in h4],20);e50=ema([x['c'] for x in h4],50);trend='UP' if e20>e50 else 'DOWN' if e20<e50 else 'NEUTRAL'
+    side='LONG' if sig['c']>hi else 'SHORT' if sig['c']<lo else 'NONE';price=(bid+ask)/2 if bid and ask else 0.0
     ctx={'ready':True,'state':'WAIT_BREAKOUT','signal_ms':sig['ct'],'trend':trend,'ema20_4h':e20,'ema50_4h':e50,'don_hi':hi,'don_lo':lo,'atr':a,'breakout':side,'price':price}
     if side=='NONE':return ctx,None
     if (side=='LONG' and trend!='UP') or (side=='SHORT' and trend!='DOWN'):
-        ctx['state']='BREAKOUT_WRONG_DIRECTION'; return ctx,None
+        ctx['state']='BREAKOUT_WRONG_DIRECTION';return ctx,None
     entry=ask if side=='LONG' else bid
     if not entry or not a:ctx['state']='DATA_ERROR';return ctx,None
-    age=max(0,(now_ms-sig['ct'])/MINUTE); chase=abs(entry-sig['c'])/a; sd=STOP_ATR*a
-    stop=entry-sd if side=='LONG' else entry+sd; target=entry+TARGET_R*sd if side=='LONG' else entry-TARGET_R*sd
-    risk=equity*risk_pct; qty=min(risk/sd if sd else 0,equity/entry if entry else 0); decision=side; state='EXECUTABLE'; why=[]
+    age=max(0,(now_ms-sig['ct'])/MINUTE);chase=abs(entry-sig['c'])/a;sd=STOP_ATR*a
+    stop=entry-sd if side=='LONG' else entry+sd;target=entry+TARGET_R*sd if side=='LONG' else entry-TARGET_R*sd
+    risk=equity*risk_pct;qty=min(risk/sd if sd else 0,equity/entry if entry else 0);decision=side;state='EXECUTABLE';why=[]
     if age>MAX_AGE_MIN:decision='NO_TRADE';state='TOO_EXTENDED';why.append('stale')
     if chase>MAX_CHASE_ATR:decision='NO_TRADE';state='TOO_EXTENDED';why.append('chase')
     if slot_open:decision='NO_TRADE';state='BLOCKED_POSITION_OPEN';why.append('slot')
@@ -75,10 +92,10 @@ def evaluate(symbol:str,h1_rows:list,h4_rows:list,bid:float,ask:float,now_ms:int
 
 
 def exit_from_1m(position:dict,bars:list[dict],now_ms:int):
-    """STOP wins when stop and target are both touched inside the same 1m bar."""
-    side=position['side']; stop=f(position['stop']); target=f(position['target'])
+    """STOP wins when stop and target are both touched inside the same closed 1m bar."""
+    side=position['side'];stop=f(position['stop']);target=f(position['target'])
     for b in sorted(bars,key=lambda x:x['ot']):
-        stop_hit=(b['l']<=stop if side=='LONG' else b['h']>=stop); target_hit=(b['h']>=target if side=='LONG' else b['l']<=target)
+        stop_hit=(b['l']<=stop if side=='LONG' else b['h']>=stop);target_hit=(b['h']>=target if side=='LONG' else b['l']<=target)
         if stop_hit:return 'STOP',stop,int(b['ct'])
         if target_hit:return 'TARGET',target,int(b['ct'])
     if now_ms>=int(position['opened_ms'])+MAX_HOLD_H*HOUR and bars:return 'TIME',f(bars[-1]['c']),int(bars[-1]['ct'])
@@ -86,7 +103,6 @@ def exit_from_1m(position:dict,bars:list[dict],now_ms:int):
 
 
 def should_process(last_processed:int|None,current_close:int,fresh_boot:bool)->tuple[bool,int]:
-    """Fresh installation establishes watermark; restart with persisted watermark can process a newer close."""
     if last_processed is None and fresh_boot:return False,current_close
     if last_processed is None:return True,current_close
     return current_close>last_processed,max(last_processed,current_close)
