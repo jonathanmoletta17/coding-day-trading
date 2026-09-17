@@ -296,9 +296,18 @@ async def emergency_cleanup_owned_position(c: Client, attempt_id: str, open_subm
     if not open_submission_attempted:
         return {"needed": False, "reason": "OPEN_SUBMISSION_NOT_ATTEMPTED"}
 
-    p = await current_pos(c)
+    # A POST can reach OKX even if our client loses the response. Give a market
+    # order a short observation window before concluding that no exposure exists.
+    deadline = time.time() + 8.0
+    p = Decimal("0")
+    while time.time() < deadline:
+        p = await current_pos(c)
+        if p != 0:
+            break
+        await asyncio.sleep(0.4)
+
     if p == 0:
-        return {"needed": False, "reason": "POSITION_ALREADY_FLAT", "final_pos": "0"}
+        return {"needed": False, "reason": "NO_EXPOSURE_OBSERVED_AFTER_OPEN_ATTEMPT", "final_pos": "0"}
     if p < 0:
         return {"needed": False, "reason": "UNEXPECTED_SHORT_POSITION_REFUSE_CLEANUP", "observed_pos": str(p)}
     if p > QTY:
