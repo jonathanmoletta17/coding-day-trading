@@ -220,7 +220,6 @@ class Store:
             try:
                 cur=self._insert_position(p,now_ms);return cur.rowcount==1
             except Exception as exc:
-                # Another transaction may have won the unique global-slot race.
                 if psycopg is not None and isinstance(exc,psycopg.errors.UniqueViolation):return False
                 raise
 
@@ -296,3 +295,34 @@ class Store:
             "avg_gross_R":sum(gross_rs)/n if n else None,"realized_pnl":total_pnl,"equity":start_equity+total_pnl,
             "daily_realized_pnl_utc":self.daily_realized_pnl(now_ms),
         }
+
+    def cost_sensitivity(self, scenarios:dict[str,float], start_equity:float)->dict:
+        """Reprice closed PAPER trades under alternate round-trip cost assumptions.
+
+        This is audit-only. It reconstructs gross PnL from entry/exit and never
+        mutates stored trades, signals, decisions, equity, or execution behavior.
+        """
+        rows=[dict(r) for r in self._exec("SELECT * FROM trades WHERE outcome!='OPEN' AND closed_ms IS NOT NULL ORDER BY closed_ms,trade_id").fetchall()]
+        out={}
+        for name,raw_cost in scenarios.items():
+            cost=float(raw_cost);rs=[];pnls=[];cost_rs=[];gross_rs=[];wins=0;cumulative=0.0;peak=0.0;max_dd=0.0
+            for t in rows:
+                side=1.0 if t.get("side")=="LONG" else -1.0
+                entry=float(t.get("entry") or 0);exit_px=float(t.get("exit") or 0);qty=float(t.get("qty") or 0);risk=float(t.get("risk") or 0)
+                gross=(exit_px-entry)*side*qty
+                fees=(entry+exit_px)*qty*(cost/2)
+                pnl=gross-fees;r=pnl/risk if risk else 0.0
+                cr=fees/risk if risk else 0.0;gr=gross/risk if risk else 0.0
+                rs.append(r);pnls.append(pnl);cost_rs.append(cr);gross_rs.append(gr)
+                if r>0:wins+=1
+                cumulative+=r;peak=max(peak,cumulative);max_dd=max(max_dd,peak-cumulative)
+            pos=sum(x for x in rs if x>0);neg=-sum(x for x in rs if x<0);n=len(rows);total_pnl=sum(pnls)
+            out[str(name)]={
+                "roundtrip_cost_rate":cost,"roundtrip_cost_bps":cost*10000.0,"closed_trades":n,
+                "wins":wins,"losses":n-wins,"win_rate":wins/n if n else None,
+                "expectancy_net_R":sum(rs)/n if n else None,"total_net_R":sum(rs) if n else 0.0,
+                "profit_factor_net":pos/neg if neg>0 else None,"max_drawdown_R":-max_dd,
+                "avg_cost_R":sum(cost_rs)/n if n else None,"avg_gross_R":sum(gross_rs)/n if n else None,
+                "realized_pnl":total_pnl,"equity":start_equity+total_pnl,
+            }
+        return out
