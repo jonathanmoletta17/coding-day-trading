@@ -6,6 +6,7 @@ import httpx
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, HTMLResponse
 import slow_engine_v2 as eng
+import slow_replay_v1 as replay
 from slow_store_v3 import Store
 
 SYMBOLS=("BTCUSDT","ETHUSDT")
@@ -20,6 +21,9 @@ COST=float(os.getenv("MRC_ROUNDTRIP_COST","0.0006"))
 DAILY_LOCK_PCT=.01
 RELEASE_SHA=os.getenv("MRC_SLOW_RELEASE_SHA","UNPINNED")
 DURABLE_STORAGE=bool(DATABASE_URL) or (not DATABASE_URL and os.path.abspath(DB_PATH).startswith("/data/"))
+RECENT_1M_SAFE_BARS=280
+HISTORY_PAGE_LIMIT=100
+HISTORY_PAGE_SLEEP=.11
 
 def iso(ms=None):
     if ms is None:return datetime.now(timezone.utc).isoformat()
@@ -37,7 +41,7 @@ def load_telemetry():
 def refresh_telemetry():STATE["telemetry"]=load_telemetry()
 
 class OKX:
-    def __init__(self):self.h=httpx.AsyncClient(timeout=12,headers={"User-Agent":"MRC-Slow-Staging/4.3"})
+    def __init__(self):self.h=httpx.AsyncClient(timeout=12,headers={"User-Agent":"MRC-Slow-Staging/4.4"})
     async def g(self,path,**params):
         r=await self.h.get(BASE+path,params=params);r.raise_for_status();j=r.json()
         if j.get("code")!="0":raise RuntimeError(f"OKX {j.get('code')} {j.get('msg')}")
@@ -52,50 +56,75 @@ class OKX:
         return h1,h4,tick[0] if tick else {}
     async def ticker(self,s):
         x=await self.g("/api/v5/market/ticker",instId=INST[s]);return x[0] if x else {}
-    async def minute_rows(self,s):return await self.g("/api/v5/market/candles",instId=INST[s],bar="1m",limit="300")
-    async def close(self):await self.h.aclose()
+    async def minute_rows_range(self,s,start_open_ms:int,cutoff_ms:int):
+        """Fetch all confirmed 1m bars required for causal replay.
 
-def one_minute(rows,cutoff):
-    out=[]
-    for r in rows:
-        if len(r)<9 or str(r[8])!="1":continue
-        ot=int(r[0]);ct=ot+eng.MINUTE
-        if ct<=cutoff:out.append({"ot":ot,"ct":ct,"o":eng.f(r[1]),"h":eng.f(r[2]),"l":eng.f(r[3]),"c":eng.f(r[4])})
-    return sorted(out,key=lambda x:x["ot"])
+        Recent windows use /candles. Longer windows page backwards through
+        /history-candles with OKX's `after` cursor until start_open_ms is covered.
+        Returns (bars, metadata).
+        """
+        start=int(start_open_ms);cutoff=int(cutoff_ms)
+        if cutoff<=start:return [],{"source":"none","pages":0,"bars":0,"from":start,"to":cutoff}
+        inst=INST[s];span=cutoff-start
+        if span<=RECENT_1M_SAFE_BARS*eng.MINUTE:
+            rows=await self.g("/api/v5/market/candles",instId=inst,bar="1m",limit="300")
+            bars=replay.confirmed_1m(rows,cutoff,start)
+            return bars,{"source":"recent","pages":1,"bars":len(bars),"from":start,"to":cutoff}
+        pages=[];cursor=cutoff+1;requests=0
+        while cursor>start:
+            rows=await self.g("/api/v5/market/history-candles",instId=inst,bar="1m",after=str(cursor),limit=str(HISTORY_PAGE_LIMIT))
+            requests+=1
+            if not rows:break
+            pages.append(rows)
+            ots=[int(r[0]) for r in rows if r]
+            if not ots:break
+            oldest=min(ots)
+            if oldest<=start:break
+            if oldest>=cursor:raise RuntimeError(f"OKX_HISTORY_CURSOR_STALLED {s} cursor={cursor} oldest={oldest}")
+            cursor=oldest
+            await asyncio.sleep(HISTORY_PAGE_SLEEP)
+            if requests>60:raise RuntimeError(f"OKX_HISTORY_PAGE_GUARD {s} requests={requests}")
+        bars=replay.merge_pages(pages,cutoff,start)
+        return bars,{"source":"history","pages":requests,"bars":len(bars),"from":start,"to":cutoff}
+    async def close(self):await self.h.aclose()
 
 STATE={
     "started_at":iso(),"heartbeat":0.0,"symbols":{},"last_error":None,"strategy":eng.STRATEGY,
-    "mode":"PAPER_STAGING","version":"slow-staging-v4.3-causal-exits","release_sha":RELEASE_SHA,"coverage_gap":None,
+    "mode":"PAPER_STAGING","version":"slow-staging-v4.4-paginated-replay","release_sha":RELEASE_SHA,"coverage_gap":None,
     "storage":{"backend":db.backend,"durable":DURABLE_STORAGE,"sqlite_path":DB_PATH if db.backend=="sqlite" else None},
+    "replay":{"max_hold_h":eng.MAX_HOLD_H,"history_page_limit":HISTORY_PAGE_LIMIT,"last":None},
     "risk_controls":{
         "risk_pct":RISK_PCT,"daily_loss_lock_pct":DAILY_LOCK_PCT,"daily_locked":False,"daily_realized_pnl_utc":0.0,
         "max_signal_age_min":eng.MAX_AGE_MIN,"max_signal_age_role":"operational_guard_after_downtime_not_research_edge",
         "one_global_position":"database_enforced","strict_next_entry_gt_prior_exit":True,
         "entry_partial_minute_policy":"exclude_pre_entry_ohlc; current_bid_ask_can_trigger_stop; target_requires_closed_causal_1m",
+        "max_hold_replay_policy":"paginate confirmed 1m through 72h deadline; STOP conservative on deadline-straddling bar; no post-deadline TARGET",
     },"telemetry":load_telemetry(),
 }
 LOCK=asyncio.Lock();TASK=None
 
 async def manage_open(client,now_ms):
     t=db.open_trade()
-    if not t:STATE["coverage_gap"]=None;return
-    all_bars=one_minute(await client.minute_rows(t["symbol"]),now_ms)
-    opened=int(t["opened_ms"]);monitor_start=eng.first_full_minute_open(opened)
-    last_check=int(t["last_check_ms"] or opened);expected=max(monitor_start,last_check)
-    bars=[b for b in all_bars if b["ot"]>=monitor_start and b["ct"]>expected]
-    if bars and bars[0]["ot"]>expected:
-        STATE["coverage_gap"]=f"{t['symbol']} 1M_COVERAGE_GAP from {iso(expected)} to {iso(bars[0]['ot'])}";return
-    # For an incomplete minute we only use the executable side of the current ticker for STOP.
+    if not t:STATE["coverage_gap"]=None;STATE["replay"]["last"]=None;return
+    w=replay.replay_window(int(t["opened_ms"]),int(t["last_check_ms"] or t["opened_ms"]),now_ms,eng.MAX_HOLD_H*eng.HOUR)
+    bars,meta=await client.minute_rows_range(t["symbol"],w["expected_open"],w["cutoff_ms"])
+    meta.update(symbol=t["symbol"],deadline_ms=w["deadline_ms"],expected_open=w["expected_open"])
+    STATE["replay"]["last"]=meta
+    gap=replay.first_gap(bars,w["expected_open"],w["cutoff_ms"])
+    if gap:
+        STATE["coverage_gap"]=f"{t['symbol']} 1M_COVERAGE_GAP missing {iso(gap['missing_open_ms'])} through {iso(gap['expected_through_open_ms'])}"
+        return
+    STATE["coverage_gap"]=None
+    # Historical closed bars always win causally over the current ticker.
+    ex=eng.exit_from_1m(t,bars,now_ms)
+    if ex:
+        outcome,px,closed_ms=ex;db.close(t,px,outcome,closed_ms,COST);return
+    # Only after replay is exhausted may the live incomplete minute trigger STOP.
     tick=await client.ticker(t["symbol"]);bid=eng.f(tick.get("bidPx"));ask=eng.f(tick.get("askPx"))
     instant=eng.current_stop_from_ticker(t,bid,ask,now_ms)
     if instant:
-        outcome,px,closed_ms=instant;STATE["coverage_gap"]=None;db.close(t,px,outcome,closed_ms,COST);return
-    if not bars:return
-    STATE["coverage_gap"]=None
-    ex=eng.exit_from_1m(t,bars,now_ms)
-    if ex:
-        outcome,px,closed_ms=ex;db.close(t,px,outcome,closed_ms,COST)
-    else:db.mark_checked(t["trade_id"],bars[-1]["ct"])
+        outcome,px,closed_ms=instant;db.close(t,px,outcome,closed_ms,COST);return
+    if bars:db.mark_checked(t["trade_id"],bars[-1]["ct"])
 
 async def loop():
     client=OKX();fresh_boot=True
@@ -149,13 +178,13 @@ async def life(app):
     global TASK
     TASK=asyncio.create_task(loop());yield;TASK.cancel();db.close_conn()
 
-app=FastAPI(title="MRC Slow Trend Staging",version="4.3",lifespan=life)
+app=FastAPI(title="MRC Slow Trend Staging",version="4.4",lifespan=life)
 def checks():return {s:bool(STATE["symbols"].get(s,{}).get("context",{}).get("ready") and not STATE["symbols"].get(s,{}).get("error")) for s in SYMBOLS}
 @app.get("/healthz")
 async def health():
     age=time.time()-STATE.get("heartbeat",0);ck=checks();process_ok=TASK is not None and not TASK.done() and age<90;ok=bool(process_ok and ck and all(ck.values()) and not STATE.get("coverage_gap"))
     return JSONResponse({"ok":ok,"feed_ready":bool(ck and all(ck.values())),"checks":ck,"coverage_gap":STATE.get("coverage_gap"),"heartbeat_age_s":round(age,1),
-        "strategy":eng.STRATEGY,"storage_backend":db.backend,"durable_storage":DURABLE_STORAGE,"last_error":STATE.get("last_error")},status_code=200 if ok else 503)
+        "strategy":eng.STRATEGY,"storage_backend":db.backend,"durable_storage":DURABLE_STORAGE,"replay":STATE.get("replay"),"last_error":STATE.get("last_error")},status_code=200 if ok else 503)
 @app.get("/readyz")
 async def ready():
     ck=checks();ok=bool(ck and all(ck.values()) and not STATE.get("coverage_gap"))
@@ -168,7 +197,8 @@ async def api_state():
 async def api_audit():
     now_ms=int(time.time()*1000)
     return {"strategy":eng.STRATEGY,"mode":"PAPER_STAGING","release_sha":RELEASE_SHA,"storage":{"backend":db.backend,"durable":DURABLE_STORAGE},
-        "risk_controls":STATE["risk_controls"],"prospective":db.audit_summary(COST,START_EQUITY,now_ms),"recent_decisions":db.recent_decisions(20),"recent_trades":db.recent(20)}
+        "replay":STATE["replay"],"risk_controls":STATE["risk_controls"],"prospective":db.audit_summary(COST,START_EQUITY,now_ms),
+        "recent_decisions":db.recent_decisions(20),"recent_trades":db.recent(20)}
 @app.get("/",response_class=HTMLResponse)
 async def root():
     return """<html><body style='background:#071019;color:#eaf2f8;font-family:system-ui;padding:28px'><h1>MRC Slow Trend — PAPER AUDIT</h1>
