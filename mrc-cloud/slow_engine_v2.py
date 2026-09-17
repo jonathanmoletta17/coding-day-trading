@@ -65,7 +65,7 @@ def evaluate(symbol:str,h1_rows:list,h4_rows:list,bid:float,ask:float,now_ms:int
     if age>MAX_AGE_MIN:decision='NO_TRADE';state='TOO_EXTENDED';why.append('stale')
     if chase>MAX_CHASE_ATR:decision='NO_TRADE';state='TOO_EXTENDED';why.append('chase')
     if slot_open:decision='NO_TRADE';state='BLOCKED_POSITION_OPEN';why.append('slot')
-    if daily_locked:decision='NO_TRADE';state='NO_TRADE';why.append('daily_lock')
+    if daily_locked:decision='NO_TRADE';state='DAILY_LOCKED';why.append('daily_lock')
     sid=hashlib.sha256(f'{STRATEGY}:{symbol}:{sig["ct"]}:{side}'.encode()).hexdigest()[:24]
     p=Candidate(symbol,sid,side,decision,int(sig['ct']),sig['c'],entry,stop,target,a,e20,e50,hi,lo,chase,risk,qty,';'.join(why))
     ctx.update(state=state,age_min=age,chase_atr=chase);return ctx,p
