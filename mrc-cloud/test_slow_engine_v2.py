@@ -1,7 +1,9 @@
-import importlib.util,sys
+import importlib.util,sys,tempfile
 from pathlib import Path
 engine_path=Path(__file__).with_name('slow_engine_v2.py')
 spec=importlib.util.spec_from_file_location('e',engine_path);m=importlib.util.module_from_spec(spec);sys.modules['e']=m;spec.loader.exec_module(m)
+store_path=Path(__file__).with_name('slow_store_v3.py')
+spec2=importlib.util.spec_from_file_location('s',store_path);s=importlib.util.module_from_spec(spec2);sys.modules['s']=s;spec2.loader.exec_module(s)
 def row(ot,o,h,l,c,q='1'):return [str(ot),str(o),str(h),str(l),str(c),'1','1','1',q]
 now=1_800_000_000_000; H=m.HOUR; F=m.FOUR_HOUR
 s1=now-45*H; h1=[row(s1+i*H,100,101,99,100) for i in range(45)]
@@ -17,4 +19,11 @@ assert m.should_process(None,100,True)==(False,100)
 assert m.should_process(100,200,True)==(True,200)
 _,p2=m.evaluate('BTCUSDT',list(reversed(h1)),list(reversed(h4)),106,106.1,now,10000)
 assert p.signal_id==p2.signal_id
-print('6/6 PASS')
+with tempfile.TemporaryDirectory() as td:
+    dbfile=str(Path(td)/'state.sqlite3')
+    a=s.Store(dbfile,''); a.set('last_processed_1h_close:BTCUSDT',123456789); a.set('telemetry:processed_close_count:BTCUSDT',7); a.close_conn()
+    b=s.Store(dbfile,'')
+    assert b.get_int('last_processed_1h_close:BTCUSDT')==123456789
+    assert b.get_int('telemetry:processed_close_count:BTCUSDT')==7
+    b.close_conn()
+print('7/7 PASS')
