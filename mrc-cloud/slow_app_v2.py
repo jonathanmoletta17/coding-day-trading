@@ -27,13 +27,8 @@ def iso(ms=None):
 
 db=Store(DB_PATH,DATABASE_URL)
 
-def persisted_ms(key):
-    raw=db.get(key)
-    try:return int(raw) if raw is not None else None
-    except Exception:return None
-
 def load_telemetry():
-    last={}; counts={}; decided={}
+    last={};counts={};decided={}
     for s in SYMBOLS:
         d=db.last_decision(s)
         last[s]=int(d["close_ms"]) if d else None
@@ -52,7 +47,7 @@ def refresh_telemetry():
 
 class OKX:
     def __init__(self):
-        self.h=httpx.AsyncClient(timeout=12,headers={"User-Agent":"MRC-Slow-Staging/4.0"})
+        self.h=httpx.AsyncClient(timeout=12,headers={"User-Agent":"MRC-Slow-Staging/4.1"})
     async def g(self,path,**params):
         r=await self.h.get(BASE+path,params=params);r.raise_for_status()
         j=r.json()
@@ -62,7 +57,7 @@ class OKX:
         inst=INST[s]
         h1,h4,tick=await asyncio.gather(
             self.g("/api/v5/market/candles",instId=inst,bar="1H",limit="120"),
-            self.g("/api/v5/market/candles",instId=inst,bar="4H",limit="120"),
+            self.g("/api/v5/market/candles",instId=inst,bar="4H",limit="150"),
             self.g("/api/v5/market/ticker",instId=inst),
         )
         return h1,h4,tick[0] if tick else {}
@@ -81,10 +76,17 @@ def one_minute(rows,cutoff):
 
 STATE={
     "started_at":iso(),"heartbeat":0.0,"symbols":{},"last_error":None,"strategy":eng.STRATEGY,
-    "mode":"PAPER_STAGING","version":"slow-staging-v4-audit","release_sha":RELEASE_SHA,
+    "mode":"PAPER_STAGING","version":"slow-staging-v4.1-parity","release_sha":RELEASE_SHA,
     "coverage_gap":None,
     "storage":{"backend":db.backend,"durable":DURABLE_STORAGE,"sqlite_path":DB_PATH if db.backend=="sqlite" else None},
-    "risk_controls":{"risk_pct":RISK_PCT,"daily_loss_lock_pct":DAILY_LOCK_PCT,"daily_locked":False,"daily_realized_pnl_utc":0.0},
+    "risk_controls":{
+        "risk_pct":RISK_PCT,
+        "daily_loss_lock_pct":DAILY_LOCK_PCT,
+        "daily_locked":False,
+        "daily_realized_pnl_utc":0.0,
+        "max_signal_age_min":eng.MAX_AGE_MIN,
+        "max_signal_age_role":"operational_guard_after_downtime_not_research_edge",
+    },
     "telemetry":load_telemetry(),
 }
 LOCK=asyncio.Lock();TASK=None
@@ -136,11 +138,9 @@ async def loop():
                         db.record_decision(eng.STRATEGY,s,int(newmark),decided_at,ctx,p)
                         if p and p.decision in ("LONG","SHORT") and not slot and not STATE["coverage_gap"]:
                             if db.open(p,now_ms):slot=True;action="PAPER_OPEN"
-                        # Watermark is written last. If a crash happens earlier, the unique audit/trade IDs make replay idempotent.
                         db.set(key,newmark)
                         refresh_telemetry()
                     elif current_close and last is None:
-                        # First boot establishes a watermark but deliberately does not backfill a historic decision.
                         db.set(key,newmark)
                     async with LOCK:
                         STATE["symbols"][s]={"context":ctx,"candidate":p.__dict__ if p else None,
@@ -164,7 +164,7 @@ async def life(app):
     global TASK
     TASK=asyncio.create_task(loop());yield;TASK.cancel();db.close_conn()
 
-app=FastAPI(title="MRC Slow Trend Staging",version="4.0",lifespan=life)
+app=FastAPI(title="MRC Slow Trend Staging",version="4.1",lifespan=life)
 
 def checks():
     return {s:bool(STATE["symbols"].get(s,{}).get("context",{}).get("ready") and not STATE["symbols"].get(s,{}).get("error")) for s in SYMBOLS}
