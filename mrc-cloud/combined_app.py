@@ -4,7 +4,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 
-import trend_v1 as live
+import slow_v1 as live
 import research_v1 as research
 
 
