@@ -166,3 +166,27 @@ def test_open_position_count_parity():
     out = evaluate_fixture(decisions=20, candidates=1, trades=1, closed=0, open_position=True)
     assert out["status"] == "PASS"
     assert out["operational_checks"]["evidence_open_count_matches_audit"] is True
+
+
+def test_log_mode_full_on_first_snapshot_or_change():
+    out = evaluate_fixture()
+    assert gate.log_mode(out, None, None, 1) == "FULL"
+    assert gate.log_mode(out, "different", out["status"], 1) == "FULL"
+
+
+def test_log_mode_silent_for_unchanged_frequent_poll():
+    out = evaluate_fixture()
+    fp = out["snapshot_fingerprint_sha256"]
+    assert gate.log_mode(out, fp, out["status"], 1) == "NONE"
+
+
+def test_log_mode_heartbeat_when_unchanged_long_enough():
+    out = evaluate_fixture()
+    fp = out["snapshot_fingerprint_sha256"]
+    assert gate.log_mode(out, fp, out["status"], gate.LOG_HEARTBEAT_POLLS) == "HEARTBEAT"
+
+
+def test_log_mode_full_on_regression():
+    previous = evaluate_fixture(decisions=20, candidates=2, trades=1, closed=1)
+    out = evaluate_fixture(decisions=19, candidates=1, trades=0, closed=0, previous=previous)
+    assert gate.log_mode(out, out["snapshot_fingerprint_sha256"], out["status"], 1) == "FULL"
