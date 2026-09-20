@@ -9,8 +9,9 @@ COPY slow_v1.py .
 COPY research_v1.py .
 COPY combined_app.py .
 COPY proxy_app.py .
+COPY slow_log_probe.py .
 RUN mkdir -p /data
 ENV MRC_DB_PATH=/data/mrc_cloud.sqlite3
-RUN python -m py_compile app.py trend_v1.py slow_v1.py research_v1.py combined_app.py proxy_app.py
+RUN python -m py_compile app.py trend_v1.py slow_v1.py research_v1.py combined_app.py proxy_app.py slow_log_probe.py
 RUN python -c "import proxy_app; print('BUILD_IMPORT_OK', proxy_app.app.title)"
 CMD ["sh","-c","uvicorn proxy_app:app --host 0.0.0.0 --port ${PORT:-8080}"]
