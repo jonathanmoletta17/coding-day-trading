@@ -1,2 +1,3 @@
 source_commit=4be650a0f1121cdc7becc80401283c3904df46bd
+trigger_revision=2
 purpose=isolated-read-only-paper-postmortem-lab
