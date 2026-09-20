@@ -8,6 +8,7 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
 BASE = os.getenv("MRC_PAPER_INTERNAL_BASE", "http://mrc-cockpit-public.railway.internal:8081").rstrip("/")
@@ -24,6 +25,10 @@ SNAPSHOT_SEQ = 0
 LAST_LOGGED_FINGERPRINT: str | None = None
 LAST_LOGGED_STATUS: str | None = None
 LAST_LOGGED_SEQ = 0
+FAILURE_STREAK = 0
+TOTAL_REFRESH_FAILURES = 0
+LAST_FAILURE_AT: str | None = None
+LAST_RECOVERY_AT: str | None = None
 
 
 def utc_now() -> str:
@@ -31,8 +36,13 @@ def utc_now() -> str:
 
 
 def fetch(path: str) -> dict:
-    with urlopen(BASE + path, timeout=10) as r:
-        return json.loads(r.read().decode())
+    try:
+        with urlopen(BASE + path, timeout=10) as r:
+            return json.loads(r.read().decode())
+    except HTTPError as exc:
+        try:body=exc.read().decode("utf-8","replace")[:4000]
+        except Exception:body="<unreadable>"
+        raise RuntimeError(f"PAPER_ENDPOINT_ERROR path={path} status={exc.code} body={body}") from exc
 
 
 def sample_band(closed: int) -> str:
@@ -128,7 +138,7 @@ def compact_history_item(result: dict) -> dict:
             "paper_release":result.get("paper_release"),"snapshot_fingerprint_sha256":result.get("snapshot_fingerprint_sha256"),
             "decision_events":e.get("decision_events"),"breakout_candidates":e.get("breakout_candidates"),"paper_trades_total":e.get("paper_trades_total"),
             "closed_trades":e.get("closed_trades"),"open_position":e.get("open_position"),"sample_band":e.get("sample_band"),
-            "regression_details":result.get("regression_details") or []}
+            "regression_details":result.get("regression_details") or [],"monitor_health":result.get("monitor_health") or {}}
 
 
 def log_mode(result: dict,last_fingerprint: str|None,last_status: str|None,seq_since_log: int)->str:
@@ -153,13 +163,19 @@ def emit_log(result: dict)->None:
 
 
 def refresh_once()->dict:
-    global RESULT,SNAPSHOT_SEQ
+    global RESULT,SNAPSHOT_SEQ,FAILURE_STREAK,TOTAL_REFRESH_FAILURES,LAST_FAILURE_AT,LAST_RECOVERY_AT
     with LOCK:previous=RESULT if RESULT.get("status") in ("PASS","FAIL") and RESULT.get("paper_release") else None
-    try:out=collect(previous)
+    try:
+        out=collect(previous)
+        if FAILURE_STREAK:LAST_RECOVERY_AT=utc_now()
+        FAILURE_STREAK=0
     except Exception as exc:
+        FAILURE_STREAK+=1;TOTAL_REFRESH_FAILURES+=1;LAST_FAILURE_AT=utc_now()
         out={"status":"FAIL","phase":"PROSPECTIVE_EVIDENCE_COLLECTION","collected_at":utc_now(),"error":f"{type(exc).__name__}: {exc}",
              "r0":{"status":"BLOCKED","real_money_allowed":False,"automatic_promotion_supported":False,"block_reasons":["PAPER_EVIDENCE_REFRESH_FAILED","HUMAN_APPROVAL_REQUIRED"]},
              "mutation_performed":False,"paper_database_mutated":False,"exchange_private_api_used":False}
+    out["monitor_health"]={"failure_streak":FAILURE_STREAK,"total_refresh_failures":TOTAL_REFRESH_FAILURES,
+        "last_failure_at":LAST_FAILURE_AT,"last_recovery_at":LAST_RECOVERY_AT}
     with LOCK:
         SNAPSHOT_SEQ+=1;out["snapshot_seq"]=SNAPSHOT_SEQ;RESULT=out;HISTORY.append(compact_history_item(out))
     emit_log(out);return out

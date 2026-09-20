@@ -1,4 +1,6 @@
 from copy import deepcopy
+from io import BytesIO
+from urllib.error import HTTPError
 
 import forward_paper_evidence_gate as gate
 
@@ -106,3 +108,18 @@ def test_log_mode_heartbeat_when_unchanged_long_enough():
 def test_log_mode_full_on_regression():
     previous=evaluate_fixture(decisions=20,candidates=2,trades=1,closed=1);out=evaluate_fixture(decisions=19,candidates=1,trades=0,closed=0,previous=previous)
     assert gate.log_mode(out,out["snapshot_fingerprint_sha256"],out["status"],1)=="FULL"
+
+
+def test_fetch_preserves_503_response_body(monkeypatch=None):
+    error=HTTPError("http://paper/readyz",503,"unavailable",{},BytesIO(b'{"ready":false,"coverage_gap":"ETH gap"}'))
+    original=gate.urlopen
+    gate.urlopen=lambda *args,**kwargs: (_ for _ in ()).throw(error)
+    try:
+        try:gate.fetch("/readyz")
+        except RuntimeError as exc:
+            message=str(exc)
+            assert "path=/readyz" in message
+            assert "status=503" in message
+            assert "coverage_gap" in message
+        else:raise AssertionError("fetch should preserve HTTP error context")
+    finally:gate.urlopen=original
