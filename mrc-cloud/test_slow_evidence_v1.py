@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from slow_evidence_v1 import evidence_summary, latest_closed_trade_review
+from slow_evidence_v1 import evidence_summary, latest_closed_trade_review, signal_reviews
 from slow_store_v3 import Store
 
 HOUR = 3_600_000
@@ -182,6 +182,41 @@ def test_latest_closed_trade_review_links_signal_decision_and_reprices_costs():
         db.close_conn()
 
 
+def test_signal_reviews_exposes_blocked_candidate_without_mutation():
+    with TemporaryDirectory() as td:
+        db = Store(str(Path(td) / "evidence.sqlite3"))
+        db.set("sentinel", "unchanged")
+        signal_ms = 1_800_000_000_000
+        signal_id = "blocked-btc"
+        payload = {
+            "symbol": "BTCUSDT", "signal_id": signal_id, "side": "LONG", "decision": "NO_TRADE",
+            "signal_ms": signal_ms, "entry": 100.0, "stop": 98.5, "target": 103.0,
+            "atr": 1.0, "risk_usdt": 25.0, "qty": 2.0, "reason": "slot",
+        }
+        db._exec(
+            "INSERT INTO signals(signal_id,symbol,side,decision,signal_ms,payload,created_at) VALUES(?,?,?,?,?,?,?)",
+            (signal_id, "BTCUSDT", "LONG", "NO_TRADE", signal_ms, json.dumps(payload), "2026-09-17T00:00:01+00:00"),
+        )
+        db.record_decision(
+            STRATEGY, "BTCUSDT", signal_ms, "2026-09-17T00:00:01+00:00",
+            ctx(state="BLOCKED_POSITION_OPEN", trend="UP", breakout="LONG"), None, action_override="NO_TRADE",
+        )
+        before = counts(db)
+        out = signal_reviews(db)
+        after = counts(db)
+        assert before == after
+        assert out["read_only"] is True
+        assert out["count"] == 1
+        item = out["items"][0]
+        assert item["signal_payload"]["reason"] == "slot"
+        assert item["decision"]["state"] == "BLOCKED_POSITION_OPEN"
+        assert item["trade"] is None
+        assert item["disposition"] == "BLOCKED_POSITION_OPEN"
+        assert item["link_integrity_pass"] is True
+        assert out["interpretation"]["parameter_retuning_authorized"] is False
+        db.close_conn()
+
+
 def run_all():
     tests = [
         test_empty_is_valid_read_only,
@@ -191,6 +226,7 @@ def run_all():
         test_trade_without_signal_is_detected,
         test_latest_closed_trade_review_reports_unavailable_without_closed_trade,
         test_latest_closed_trade_review_links_signal_decision_and_reprices_costs,
+        test_signal_reviews_exposes_blocked_candidate_without_mutation,
     ]
     for fn in tests:
         fn()

@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse, HTMLResponse
 import slow_engine_v2 as eng
 import slow_replay_v1 as replay
 from slow_store_v3 import Store
-from slow_evidence_v1 import evidence_summary, latest_closed_trade_review
+from slow_evidence_v1 import evidence_summary, latest_closed_trade_review, signal_reviews
 
 SYMBOLS=("BTCUSDT","ETHUSDT")
 INST={"BTCUSDT":"BTC-USDT-SWAP","ETHUSDT":"ETH-USDT-SWAP"}
@@ -45,6 +45,7 @@ def refresh_telemetry():STATE["telemetry"]=load_telemetry()
 def read_evidence():return evidence_summary(db,SYMBOLS,eng.HOUR)
 
 def read_latest_closed_trade_review():return latest_closed_trade_review(db,COST_SCENARIOS)
+def read_signal_reviews():return signal_reviews(db,100)
 
 class OKX:
     def __init__(self):self.h=httpx.AsyncClient(timeout=12,headers={"User-Agent":"MRC-Slow-Staging/4.7"})
@@ -96,7 +97,7 @@ class OKX:
 
 STATE={
     "started_at":iso(),"heartbeat":0.0,"symbols":{},"last_error":None,"strategy":eng.STRATEGY,
-    "mode":"PAPER_STAGING","version":"slow-staging-v4.7-linked-trade-review","release_sha":RELEASE_SHA,"coverage_gap":None,
+    "mode":"PAPER_STAGING","version":"slow-staging-v4.8-observability","release_sha":RELEASE_SHA,"coverage_gap":None,
     "storage":{"backend":db.backend,"durable":DURABLE_STORAGE,"sqlite_path":DB_PATH if db.backend=="sqlite" else None},
     "replay":{"max_hold_h":eng.MAX_HOLD_H,"history_page_limit":HISTORY_PAGE_LIMIT,"last":None},
     "cost_policy":{"paper_baseline_bps":COST*10000.0,"audit_scenarios_bps":{k:v*10000.0 for k,v in COST_SCENARIOS.items()},
@@ -185,18 +186,25 @@ async def life(app):
     global TASK
     TASK=asyncio.create_task(loop());yield;TASK.cancel();db.close_conn()
 
-app=FastAPI(title="MRC Slow Trend Staging",version="4.7",lifespan=life)
+app=FastAPI(title="MRC Slow Trend Staging",version="4.8",lifespan=life)
 def checks():return {s:bool(STATE["symbols"].get(s,{}).get("context",{}).get("ready") and not STATE["symbols"].get(s,{}).get("error")) for s in SYMBOLS}
 @app.get("/healthz")
 async def health():
     age=time.time()-STATE.get("heartbeat",0);ck=checks();process_ok=TASK is not None and not TASK.done() and age<90;ok=bool(process_ok and ck and all(ck.values()) and not STATE.get("coverage_gap"))
     return JSONResponse({"ok":ok,"feed_ready":bool(ck and all(ck.values())),"checks":ck,"coverage_gap":STATE.get("coverage_gap"),"heartbeat_age_s":round(age,1),
         "strategy":eng.STRATEGY,"storage_backend":db.backend,"durable_storage":DURABLE_STORAGE,"replay":STATE.get("replay"),"last_error":STATE.get("last_error")},status_code=200 if ok else 503)
+@app.get("/livez")
+async def live():
+    age=time.time()-STATE.get("heartbeat",0);process_ok=TASK is not None and not TASK.done() and age<90
+    return JSONResponse({"live":bool(process_ok),"heartbeat_age_s":round(age,1),"task_running":bool(TASK is not None and not TASK.done()),
+        "strategy":eng.STRATEGY,"mode":"PAPER_STAGING","release_sha":RELEASE_SHA},status_code=200 if process_ok else 503)
 @app.get("/readyz")
 async def ready():
     ck=checks();ok=bool(ck and all(ck.values()) and not STATE.get("coverage_gap"));ev=read_evidence()
     return JSONResponse({"ready":ok,"checks":ck,"coverage_gap":STATE.get("coverage_gap"),"strategy":eng.STRATEGY,"mode":"PAPER_STAGING",
-        "storage_backend":db.backend,"durable_storage":DURABLE_STORAGE,"release_sha":RELEASE_SHA,"evidence_integrity_pass":ev["integrity_pass"]},status_code=200 if ok else 503)
+        "storage_backend":db.backend,"durable_storage":DURABLE_STORAGE,"release_sha":RELEASE_SHA,"evidence_integrity_pass":ev["integrity_pass"],
+        "last_error":STATE.get("last_error"),"symbol_errors":{s:(STATE.get("symbols",{}).get(s,{}) or {}).get("error") for s in SYMBOLS},
+        "replay":STATE.get("replay")},status_code=200 if ok else 503)
 @app.get("/api/state")
 async def api_state():
     async with LOCK:return json.loads(json.dumps(STATE,default=str))
@@ -214,6 +222,9 @@ async def api_evidence():
 @app.get("/api/latest-closed-trade-review")
 async def api_latest_closed_trade_review():
     return {"strategy":eng.STRATEGY,"mode":"PAPER_STAGING","release_sha":RELEASE_SHA,"review":read_latest_closed_trade_review()}
+@app.get("/api/signal-reviews")
+async def api_signal_reviews():
+    return {"strategy":eng.STRATEGY,"mode":"PAPER_STAGING","release_sha":RELEASE_SHA,"signal_reviews":read_signal_reviews()}
 @app.get("/api/cost-sensitivity")
 async def api_cost_sensitivity():
     return {"strategy":eng.STRATEGY,"mode":"PAPER_STAGING","release_sha":RELEASE_SHA,"cost_policy":STATE["cost_policy"],
@@ -221,5 +232,5 @@ async def api_cost_sensitivity():
 @app.get("/",response_class=HTMLResponse)
 async def root():
     return """<html><body style='background:#071019;color:#eaf2f8;font-family:system-ui;padding:28px'><h1>MRC Slow Trend — PAPER AUDIT</h1>
-    <p>4H EMA20/50 + 1H Donchian20 + ATR14 · PAPER ONLY</p><p><a style='color:#70c7ff' href='/api/state'>State</a> · <a style='color:#70c7ff' href='/api/audit'>Audit</a> · <a style='color:#70c7ff' href='/api/evidence'>Evidence</a> · <a style='color:#70c7ff' href='/api/latest-closed-trade-review'>Latest Trade Review</a> · <a style='color:#70c7ff' href='/api/cost-sensitivity'>Costs</a> · <a style='color:#70c7ff' href='/readyz'>Readiness</a></p>
+    <p>4H EMA20/50 + 1H Donchian20 + ATR14 · PAPER ONLY</p><p><a style='color:#70c7ff' href='/api/state'>State</a> · <a style='color:#70c7ff' href='/api/audit'>Audit</a> · <a style='color:#70c7ff' href='/api/evidence'>Evidence</a> · <a style='color:#70c7ff' href='/api/latest-closed-trade-review'>Latest Trade Review</a> · <a style='color:#70c7ff' href='/api/signal-reviews'>Signal Reviews</a> · <a style='color:#70c7ff' href='/api/cost-sensitivity'>Costs</a> · <a style='color:#70c7ff' href='/readyz'>Readiness</a></p>
     <div id='x'>loading…</div><script>async function g(){let r=await fetch('/api/audit'),x=await r.json();document.querySelector('#x').innerHTML='<pre>'+JSON.stringify(x,null,2)+'</pre>'};g();setInterval(g,10000)</script></body></html>"""

@@ -249,3 +249,63 @@ def latest_closed_trade_review(db, cost_scenarios: dict[str, float]) -> dict:
             "real_money_promotion_authorized": False,
         },
     }
+
+
+def signal_reviews(db, limit: int = 100) -> dict:
+    """Return durable signal -> decision -> trade links without mutating PAPER state."""
+    bounded_limit = max(1, min(1000, int(limit)))
+    rows = db._exec(
+        "SELECT * FROM signals ORDER BY signal_ms ASC, signal_id ASC LIMIT ?",
+        (bounded_limit,),
+    ).fetchall()
+    items = []
+    for raw_signal in rows:
+        signal = dict(raw_signal)
+        payload = _loads(signal.get("payload"))
+        signal_ms = int(signal["signal_ms"]) if signal.get("signal_ms") is not None else None
+        decision_row = None
+        if signal_ms is not None:
+            decision_row = db._exec(
+                "SELECT * FROM decision_events WHERE symbol=? AND close_ms=? ORDER BY decided_at LIMIT 1",
+                (signal.get("symbol"), signal_ms),
+            ).fetchone()
+        decision = dict(decision_row) if decision_row else None
+        decision_payload = _loads(decision.pop("payload", None)) if decision else None
+        trade_row = db._exec(
+            "SELECT * FROM trades WHERE signal_id=? ORDER BY opened_ms,trade_id LIMIT 1",
+            (signal.get("signal_id"),),
+        ).fetchone()
+        trade = dict(trade_row) if trade_row else None
+        links = {
+            "decision_exists_at_signal_close": decision is not None,
+            "signal_payload_id_matches": bool(payload and payload.get("signal_id") == signal.get("signal_id")),
+            "signal_payload_symbol_matches": bool(payload and payload.get("symbol") == signal.get("symbol")),
+            "trade_signal_id_matches": bool(not trade or trade.get("signal_id") == signal.get("signal_id")),
+        }
+        disposition = "TRADED" if trade else (
+            (decision or {}).get("state")
+            or (decision or {}).get("action")
+            or signal.get("decision")
+            or "UNCLASSIFIED"
+        )
+        items.append({
+            "signal": signal,
+            "signal_payload": payload,
+            "decision": decision,
+            "decision_payload": decision_payload,
+            "trade": trade,
+            "disposition": disposition,
+            "links": links,
+            "link_integrity_pass": all(links.values()),
+        })
+    return {
+        "read_only": True,
+        "limit": bounded_limit,
+        "count": len(items),
+        "items": items,
+        "interpretation": {
+            "role": "descriptive signal lineage and blocked-candidate analysis only",
+            "parameter_retuning_authorized": False,
+            "real_money_promotion_authorized": False,
+        },
+    }
