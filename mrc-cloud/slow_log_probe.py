@@ -16,7 +16,9 @@ URL = os.getenv("MRC_PAPER_LOCAL_BASE", "http://127.0.0.1:8081").rstrip("/")
 POLL_SECONDS = max(30, int(os.getenv("MRC_ARCHIVE_POLL_SECONDS", "300")))
 HEARTBEAT_SECONDS = max(900, int(os.getenv("MRC_ARCHIVE_HEARTBEAT_SECONDS", "3600")))
 BACKUP_SECONDS = max(3600, int(os.getenv("MRC_BACKUP_SECONDS", "86400")))
-BACKUP_RETENTION = max(8, min(256, int(os.getenv("MRC_BACKUP_RETENTION", "64"))))
+# Zero-cost mode keeps a very small rolling recovery set on the existing
+# volume. The hash-chained evidence log remains the audit source of truth.
+BACKUP_RETENTION = max(1, min(8, int(os.getenv("MRC_BACKUP_RETENTION", "2"))))
 DB_PATH = Path(os.getenv("MRC_STAGING_DB", "/data/mrc_slow_staging_v3.sqlite3"))
 ARCHIVE_ROOT = Path(os.getenv("MRC_EVIDENCE_ARCHIVE_ROOT", "/data/evidence"))
 BACKUP_ROOT = Path(os.getenv("MRC_BACKUP_ROOT", "/data/backups"))

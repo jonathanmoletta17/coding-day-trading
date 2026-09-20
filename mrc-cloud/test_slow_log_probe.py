@@ -81,11 +81,39 @@ def test_meaningful_summary_tracks_only_audit_state():
     assert out["all_closed_trade_links_pass"] is True
 
 
+def test_zero_cost_backup_retention_is_bounded():
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        source = root / "paper.sqlite3"
+        connection = sqlite3.connect(source)
+        connection.execute("CREATE TABLE evidence(id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+        connection.execute("INSERT INTO evidence(value) VALUES('bounded')")
+        connection.commit()
+        connection.close()
+
+        old_root, old_manifest, old_retention = probe.BACKUP_ROOT, probe.BACKUP_MANIFEST, probe.BACKUP_RETENTION
+        try:
+            probe.BACKUP_ROOT = root / "backups"
+            probe.BACKUP_MANIFEST = probe.BACKUP_ROOT / "backup_manifest_chain.ndjson"
+            probe.BACKUP_RETENTION = 2
+            for _ in range(4):
+                probe.backup_sqlite(source, "RETENTION_TEST")
+        finally:
+            probe.BACKUP_ROOT, probe.BACKUP_MANIFEST, probe.BACKUP_RETENTION = old_root, old_manifest, old_retention
+
+        backups = list((root / "backups").glob("mrc_slow_staging_v3_*.sqlite3"))
+        assert len(backups) == 2
+        manifest = probe.verify_chain(root / "backups" / "backup_manifest_chain.ndjson")
+        assert manifest["ok"] is True
+        assert manifest["records"] == 4
+
+
 def run_all():
     tests = [
         test_hash_chain_detects_tampering,
         test_sqlite_backup_is_consistent_and_source_is_unchanged,
         test_meaningful_summary_tracks_only_audit_state,
+        test_zero_cost_backup_retention_is_bounded,
     ]
     for fn in tests:
         fn()

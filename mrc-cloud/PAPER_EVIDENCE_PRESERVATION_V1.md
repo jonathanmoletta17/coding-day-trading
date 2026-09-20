@@ -43,7 +43,7 @@ Backups are created:
 
 Each backup must pass `PRAGMA quick_check`, is hashed with SHA-256, and is registered in a separate append-only manifest chain under `/data/backups`.
 
-Retention is 64 verified SQLite backup files by default. Rotation is restricted to files matching the exact managed backup prefix.
+Zero-cost mode retains two verified SQLite backup files by default, configurable from one to eight. Rotation is restricted to files matching the exact managed backup prefix. The archive writer runs inside the PAPER sidecar process, avoiding a separate always-on container process.
 
 These copies protect against application-level or SQLite-level corruption and provide point-in-time files on the mounted volume. They do not, by themselves, protect against loss or deletion of the entire Railway volume. A platform-managed scheduled volume backup or a separately authorized off-volume target is still required for full disaster recovery.
 

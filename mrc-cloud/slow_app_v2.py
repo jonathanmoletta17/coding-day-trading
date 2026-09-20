@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, HTMLResponse
 import slow_engine_v2 as eng
 import slow_replay_v1 as replay
+import slow_log_probe as archive
 from slow_store_v3 import Store
 from slow_evidence_v1 import (
     closed_trade_reviews,
@@ -36,6 +37,8 @@ HISTORY_PAGE_LIMIT=100
 HISTORY_PAGE_SLEEP=.11
 ARCHIVE_HEALTH_PATH=os.getenv("MRC_EVIDENCE_ARCHIVE_HEALTH","/data/evidence/archive_health.json")
 ARCHIVE_MAX_STALE_SECONDS=max(600,int(os.getenv("MRC_EVIDENCE_ARCHIVE_MAX_STALE_SECONDS","900")))
+ARCHIVE_EMBEDDED=os.getenv("MRC_ARCHIVE_EMBEDDED","0").strip()=="1"
+ARCHIVE_START_DELAY=max(1,int(os.getenv("MRC_ARCHIVE_START_DELAY_SECONDS","3")))
 
 def iso(ms=None):
     if ms is None:return datetime.now(timezone.utc).isoformat()
@@ -132,7 +135,7 @@ STATE={
         "max_hold_replay_policy":"paginate confirmed 1m through 72h deadline; STOP conservative on deadline-straddling bar; no post-deadline TARGET",
     },"telemetry":load_telemetry(),
 }
-LOCK=asyncio.Lock();TASK=None
+LOCK=asyncio.Lock();TASK=None;ARCHIVE_TASK=None
 
 async def manage_open(client,now_ms):
     t=db.open_trade()
@@ -204,8 +207,19 @@ async def loop():
 
 @asynccontextmanager
 async def life(app):
-    global TASK
-    TASK=asyncio.create_task(loop());yield;TASK.cancel();db.close_conn()
+    global TASK,ARCHIVE_TASK
+    TASK=asyncio.create_task(loop())
+    if ARCHIVE_EMBEDDED:
+        async def delayed_archive():
+            await asyncio.sleep(ARCHIVE_START_DELAY)
+            await archive.main()
+        ARCHIVE_TASK=asyncio.create_task(delayed_archive())
+    try:
+        yield
+    finally:
+        TASK.cancel()
+        if ARCHIVE_TASK is not None:ARCHIVE_TASK.cancel()
+        db.close_conn()
 
 app=FastAPI(title="MRC Slow Trend Staging",version="4.9",lifespan=life)
 def checks():return {s:bool(STATE["symbols"].get(s,{}).get("context",{}).get("ready") and not STATE["symbols"].get(s,{}).get("error")) for s in SYMBOLS}
