@@ -20,17 +20,23 @@ def fixtures(decisions=16, candidates=0, trades=0, closed=0, open_position=False
     audit={"strategy":"SLOW_TREND_BREAKOUT_V1","mode":"PAPER_STAGING","release_sha":RELEASE,"storage":{"backend":"sqlite","durable":True},
         "risk_controls":{"one_global_position":"database_enforced"},"cost_policy":{"paper_baseline_bps":6.0,"demo_calibration_bps":10.01},"prospective":prospective,
         "cost_sensitivity":{"baseline_6bps":{"closed_trades":closed},"stress_10bps":{"closed_trades":closed},"stress_15bps":{"closed_trades":closed}},
-        "latest_closed_trade_review":review}
+        "latest_closed_trade_review":review,
+        "scientific_readiness":{"read_only":True,"gate_version":"PAPER_SCIENTIFIC_GATE_V1","precommitted":True,
+            "automatic_promotion_supported":False,"real_money_allowed":False,"evidence_floor_met":False,"status":"INSUFFICIENT_EVIDENCE"}}
     costs={"release_sha":RELEASE,"scenarios":audit["cost_sensitivity"]}
     evidence_quality={"read_only":True,"integrity_pass":True,"decision_events_total":decisions,"signals_total":candidates,"paper_trades_total":trades,
         "closed_paper_trades":closed,"open_paper_trades":1 if open_position else 0,"historical_unpaired_decision_closes":[],
         "per_symbol":{"BTCUSDT":{"decision_events":decisions//2},"ETHUSDT":{"decision_events":decisions-decisions//2}}}
     evidence={"strategy":"SLOW_TREND_BREAKOUT_V1","mode":"PAPER_STAGING","release_sha":RELEASE,"evidence_quality":evidence_quality}
-    return ready,audit,costs,evidence
+    archive={"strategy":"SLOW_TREND_BREAKOUT_V1","mode":"PAPER_STAGING","release_sha":RELEASE,
+        "archive_health":{"ok":True,"fresh":True,"chain_ok":True,"last_backup_sha256":"abc123","last_backup_quick_check":"ok"}}
+    reviews={"strategy":"SLOW_TREND_BREAKOUT_V1","mode":"PAPER_STAGING","release_sha":RELEASE,
+        "closed_trade_reviews":{"read_only":True,"count":closed,"all_link_integrity_pass":True,"items":[]}}
+    return ready,audit,costs,evidence,archive,reviews
 
 
 def evaluate_fixture(*args,previous=None,**kwargs):
-    ready,audit,costs,evidence=fixtures(*args,**kwargs);return gate.evaluate(ready,audit,costs,evidence,previous)
+    return gate.evaluate(*fixtures(*args,**kwargs),previous=previous)
 
 
 def test_initial_zero_trade_state_passes_operationally():
@@ -53,28 +59,28 @@ def test_counter_regression_fails_closed():
 
 
 def test_release_change_does_not_compare_counters_across_release_boundary():
-    previous=evaluate_fixture(decisions=20,candidates=2,trades=1,closed=1);ready,audit,costs,evidence=fixtures(decisions=1,candidates=0,trades=0,closed=0)
-    audit=deepcopy(audit);ready=deepcopy(ready);costs=deepcopy(costs);evidence=deepcopy(evidence)
-    for obj in (audit,ready,costs,evidence):obj["release_sha"]="different-release"
-    out=gate.evaluate(ready,audit,costs,evidence,previous);assert out["operational_checks"]["decision_events_monotonic"] is True;assert out["operational_checks"]["release_pinned_across_endpoints"] is False;assert out["status"]=="FAIL"
+    previous=evaluate_fixture(decisions=20,candidates=2,trades=1,closed=1);items=list(fixtures(decisions=1,candidates=0,trades=0,closed=0))
+    items=[deepcopy(item) for item in items]
+    for obj in items:obj["release_sha"]="different-release"
+    out=gate.evaluate(*items,previous=previous);assert out["operational_checks"]["decision_events_monotonic"] is True;assert out["operational_checks"]["release_pinned_across_endpoints"] is False;assert out["status"]=="FAIL"
 
 
 def test_baseline_mutation_fails_gate():
-    ready,audit,costs,evidence=fixtures();audit["cost_policy"]["paper_baseline_bps"]=10.01;out=gate.evaluate(ready,audit,costs,evidence)
+    ready,audit,costs,evidence,archive,reviews=fixtures();audit["cost_policy"]["paper_baseline_bps"]=10.01;out=gate.evaluate(ready,audit,costs,evidence,archive,reviews)
     assert out["status"]=="FAIL";assert out["operational_checks"]["baseline_6bps_preserved"] is False;assert out["r0"]["status"]=="BLOCKED"
 
 
 def test_coverage_gap_fails_gate():
-    ready,audit,costs,evidence=fixtures();ready["coverage_gap"]="BTCUSDT gap";out=gate.evaluate(ready,audit,costs,evidence);assert out["status"]=="FAIL";assert out["operational_checks"]["coverage_gap_clear"] is False
+    ready,audit,costs,evidence,archive,reviews=fixtures();ready["coverage_gap"]="BTCUSDT gap";out=gate.evaluate(ready,audit,costs,evidence,archive,reviews);assert out["status"]=="FAIL";assert out["operational_checks"]["coverage_gap_clear"] is False
 
 
 def test_evidence_integrity_failure_fails_gate():
-    ready,audit,costs,evidence=fixtures();evidence["evidence_quality"]["integrity_pass"]=False;ready["evidence_integrity_pass"]=False;out=gate.evaluate(ready,audit,costs,evidence)
+    ready,audit,costs,evidence,archive,reviews=fixtures();evidence["evidence_quality"]["integrity_pass"]=False;ready["evidence_integrity_pass"]=False;out=gate.evaluate(ready,audit,costs,evidence,archive,reviews)
     assert out["status"]=="FAIL";assert out["operational_checks"]["evidence_integrity_pass"] is False;assert "PAPER_EVIDENCE_INTEGRITY_NOT_CLEAN" in out["r0"]["block_reasons"]
 
 
 def test_cross_endpoint_count_mismatch_fails_gate():
-    ready,audit,costs,evidence=fixtures(decisions=18);evidence["evidence_quality"]["decision_events_total"]=16;out=gate.evaluate(ready,audit,costs,evidence)
+    ready,audit,costs,evidence,archive,reviews=fixtures(decisions=18);evidence["evidence_quality"]["decision_events_total"]=16;out=gate.evaluate(ready,audit,costs,evidence,archive,reviews)
     assert out["status"]=="FAIL";assert out["operational_checks"]["evidence_decision_count_matches_audit"] is False
 
 
@@ -83,14 +89,37 @@ def test_open_position_count_parity():
 
 
 def test_closed_trade_requires_clean_linked_review():
-    ready,audit,costs,evidence=fixtures(decisions=22,candidates=1,trades=1,closed=1);audit["latest_closed_trade_review"]["link_integrity_pass"]=False
-    out=gate.evaluate(ready,audit,costs,evidence);assert out["status"]=="FAIL";assert out["operational_checks"]["latest_closed_trade_review_link_integrity"] is False
+    ready,audit,costs,evidence,archive,reviews=fixtures(decisions=22,candidates=1,trades=1,closed=1);audit["latest_closed_trade_review"]["link_integrity_pass"]=False
+    out=gate.evaluate(ready,audit,costs,evidence,archive,reviews);assert out["status"]=="FAIL";assert out["operational_checks"]["latest_closed_trade_review_link_integrity"] is False
     assert "LATEST_CLOSED_TRADE_REVIEW_NOT_CLEAN" in out["r0"]["block_reasons"]
 
 
 def test_zero_closed_trade_requires_explicit_unavailable_review():
-    ready,audit,costs,evidence=fixtures();audit["latest_closed_trade_review"]={"available":True,"read_only":True,"link_integrity_pass":True,"cost_scenarios":{}}
-    out=gate.evaluate(ready,audit,costs,evidence);assert out["status"]=="FAIL";assert out["operational_checks"]["latest_closed_trade_review_matches_sample_state"] is False
+    ready,audit,costs,evidence,archive,reviews=fixtures();audit["latest_closed_trade_review"]={"available":True,"read_only":True,"link_integrity_pass":True,"cost_scenarios":{}}
+    out=gate.evaluate(ready,audit,costs,evidence,archive,reviews);assert out["status"]=="FAIL";assert out["operational_checks"]["latest_closed_trade_review_matches_sample_state"] is False
+
+
+def test_archive_chain_or_backup_failure_fails_closed():
+    ready,audit,costs,evidence,archive,reviews=fixtures()
+    archive["archive_health"]["chain_ok"]=False
+    archive["archive_health"]["ok"]=False
+    archive["archive_health"]["last_backup_sha256"]=None
+    out=gate.evaluate(ready,audit,costs,evidence,archive,reviews)
+    assert out["status"]=="FAIL"
+    assert out["operational_checks"]["evidence_archive_chain_valid"] is False
+    assert out["operational_checks"]["sqlite_backup_verified"] is False
+    assert "PAPER_OPERATIONAL_GATE_NOT_CLEAN" in out["r0"]["block_reasons"]
+
+
+def test_scientific_gate_cannot_silently_enable_real_money():
+    ready,audit,costs,evidence,archive,reviews=fixtures()
+    audit["scientific_readiness"]["automatic_promotion_supported"]=True
+    audit["scientific_readiness"]["real_money_allowed"]=True
+    out=gate.evaluate(ready,audit,costs,evidence,archive,reviews)
+    assert out["status"]=="FAIL"
+    assert out["operational_checks"]["scientific_gate_cannot_auto_promote"] is False
+    assert out["r0"]["status"]=="BLOCKED"
+    assert out["r0"]["real_money_allowed"] is False
 
 
 def test_log_mode_full_on_first_snapshot_or_change():
