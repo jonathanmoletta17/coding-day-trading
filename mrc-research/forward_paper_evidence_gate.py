@@ -53,10 +53,13 @@ def sample_band(closed: int) -> str:
     return "N50_PLUS"
 
 
-def evaluate(ready: dict, audit: dict, costs: dict, evidence: dict, previous: dict | None = None) -> dict:
+def evaluate(ready: dict, audit: dict, costs: dict, evidence: dict, archive: dict, reviews: dict, previous: dict | None = None) -> dict:
     p=audit.get("prospective") or {};cp=audit.get("cost_policy") or {};cs=audit.get("cost_sensitivity") or {}
     storage=audit.get("storage") or {};rc=audit.get("risk_controls") or {};eq=evidence.get("evidence_quality") or {}
     review=audit.get("latest_closed_trade_review") or {}
+    science=audit.get("scientific_readiness") or {}
+    archive_health=archive.get("archive_health") or {}
+    closed_reviews=reviews.get("closed_trade_reviews") or {}
     closed=int(p.get("closed_trades") or 0);decisions=int(p.get("decision_events") or 0);candidates=int(p.get("breakout_candidates") or 0)
     paper_trades=int(p.get("paper_trades_total") or 0);open_position=bool(p.get("open_position"));current_release=audit.get("release_sha")
 
@@ -70,7 +73,8 @@ def evaluate(ready: dict, audit: dict, costs: dict, evidence: dict, previous: di
             prior=int(pe.get(field) or 0);ok=current>=prior;monotonic[check_name]=ok
             if not ok:regression_details.append(f"{field}:{prior}->{current}")
 
-    release_chain_ok=(ready.get("release_sha")==EXPECTED_RELEASE and current_release==EXPECTED_RELEASE and costs.get("release_sha")==EXPECTED_RELEASE and evidence.get("release_sha")==EXPECTED_RELEASE)
+    release_chain_ok=(ready.get("release_sha")==EXPECTED_RELEASE and current_release==EXPECTED_RELEASE and costs.get("release_sha")==EXPECTED_RELEASE
+        and evidence.get("release_sha")==EXPECTED_RELEASE and archive.get("release_sha")==EXPECTED_RELEASE and reviews.get("release_sha")==EXPECTED_RELEASE)
     review_read_only=review.get("read_only") is True
     if closed==0:
         review_state_ok=review.get("available") is False and review.get("reason")=="NO_CLOSED_PROSPECTIVE_PAPER_TRADE"
@@ -100,6 +104,14 @@ def evaluate(ready: dict, audit: dict, costs: dict, evidence: dict, previous: di
         "latest_closed_trade_review_matches_sample_state":review_state_ok,
         "latest_closed_trade_review_link_integrity":review_links_ok,
         "latest_closed_trade_review_cost_scenarios":review_costs_ok,
+        "all_closed_trade_reviews_read_only":closed_reviews.get("read_only") is True,
+        "all_closed_trade_reviews_link_integrity":closed_reviews.get("all_link_integrity_pass") is True,
+        "scientific_readiness_read_only":science.get("read_only") is True,
+        "scientific_gate_precommitted":science.get("precommitted") is True and science.get("gate_version")=="PAPER_SCIENTIFIC_GATE_V1",
+        "scientific_gate_cannot_auto_promote":science.get("automatic_promotion_supported") is False and science.get("real_money_allowed") is False,
+        "evidence_archive_healthy":archive_health.get("ok") is True and archive_health.get("fresh") is True,
+        "evidence_archive_chain_valid":archive_health.get("chain_ok") is True,
+        "sqlite_backup_verified":bool(archive_health.get("last_backup_sha256")) and archive_health.get("last_backup_quick_check")=="ok",
         **monotonic,
     }
     sample_state="NO_CLOSED_PROSPECTIVE_TRADES" if closed==0 else "PROSPECTIVE_TRADES_ACCUMULATING"
@@ -110,10 +122,12 @@ def evaluate(ready: dict, audit: dict, costs: dict, evidence: dict, previous: di
         "total_net_R":p.get("total_net_R"),"profit_factor_net":p.get("profit_factor_net"),"max_drawdown_R":p.get("max_drawdown_R"),
         "avg_cost_R":p.get("avg_cost_R"),"avg_gross_R":p.get("avg_gross_R"),"realized_pnl":p.get("realized_pnl"),"equity":p.get("equity"),
         "daily_realized_pnl_utc":p.get("daily_realized_pnl_utc"),"cost_sensitivity":cs,"demo_calibration_bps":cp.get("demo_calibration_bps"),
-        "evidence_quality":eq,"latest_closed_trade_review":review,
+        "evidence_quality":eq,"latest_closed_trade_review":review,"closed_trade_reviews":closed_reviews,
+        "scientific_readiness":science,"archive_health":archive_health,
     }
     r0_block_reasons=["HUMAN_APPROVAL_REQUIRED","PRODUCTION_CREDENTIALS_AND_ACCOUNT_NOT_IN_SCOPE","PRODUCTION_SPECIFIC_RISK_AND_INCIDENT_CONTROLS_NOT_VALIDATED","PRODUCTION_EXECUTION_SLIPPAGE_NOT_VALIDATED"]
     if closed==0:r0_block_reasons.insert(0,"NO_CLOSED_PROSPECTIVE_PAPER_TRADES")
+    if science.get("evidence_floor_met") is not True:r0_block_reasons.insert(0,"SCIENTIFIC_EVIDENCE_FLOOR_NOT_MET")
     if regression_details:r0_block_reasons.insert(0,"PROSPECTIVE_COUNTER_REGRESSION_DETECTED")
     if not eq.get("integrity_pass"):r0_block_reasons.insert(0,"PAPER_EVIDENCE_INTEGRITY_NOT_CLEAN")
     if closed>0 and not (review_read_only and review_state_ok and review_links_ok and review_costs_ok):r0_block_reasons.insert(0,"LATEST_CLOSED_TRADE_REVIEW_NOT_CLEAN")
@@ -129,7 +143,8 @@ def evaluate(ready: dict, audit: dict, costs: dict, evidence: dict, previous: di
 
 
 def collect(previous: dict | None = None) -> dict:
-    return evaluate(fetch("/readyz"),fetch("/api/audit"),fetch("/api/cost-sensitivity"),fetch("/api/evidence"),previous)
+    return evaluate(fetch("/readyz"),fetch("/api/audit"),fetch("/api/cost-sensitivity"),fetch("/api/evidence"),
+                    fetch("/api/archive-health"),fetch("/api/closed-trade-reviews"),previous)
 
 
 def compact_history_item(result: dict) -> dict:
