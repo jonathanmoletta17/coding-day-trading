@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -99,7 +100,9 @@ def append_chain_record(path: Path, kind: str, payload: dict) -> dict:
 
 def atomic_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    # Rolling deployments can briefly run two containers against the same
+    # persistent volume. PID alone is not unique across containers.
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     with temporary.open("w", encoding="utf-8") as handle:
         json.dump(value, handle, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
         handle.flush()
@@ -185,6 +188,17 @@ async def fetch_json(client, path: str) -> dict:
     return response.json()
 
 
+async def fetch_archive_payload(client) -> dict:
+    # Avoid a burst of fresh connections exactly when the sidecar starts.
+    ready = await fetch_json(client, "/readyz")
+    evidence = await fetch_json(client, "/api/evidence")
+    audit = await fetch_json(client, "/api/audit")
+    costs = await fetch_json(client, "/api/cost-sensitivity")
+    science = await fetch_json(client, "/api/scientific-readiness")
+    reviews = await fetch_json(client, "/api/closed-trade-reviews")
+    return archive_payload(ready, evidence, audit, costs, science, reviews)
+
+
 async def main():
     import httpx
 
@@ -201,15 +215,7 @@ async def main():
         while True:
             now = time.time()
             try:
-                ready, evidence, audit, costs, science, reviews = await asyncio.gather(
-                    fetch_json(client, "/readyz"),
-                    fetch_json(client, "/api/evidence"),
-                    fetch_json(client, "/api/audit"),
-                    fetch_json(client, "/api/cost-sensitivity"),
-                    fetch_json(client, "/api/scientific-readiness"),
-                    fetch_json(client, "/api/closed-trade-reviews"),
-                )
-                payload = archive_payload(ready, evidence, audit, costs, science, reviews)
+                payload = await fetch_archive_payload(client)
                 summary = payload["summary"]
                 fingerprint = hashlib.sha256(canonical_bytes(summary)).hexdigest()
                 state_changed = fingerprint != last_fingerprint
@@ -244,24 +250,27 @@ async def main():
                     pass
                 print(f"SLOW_EVIDENCE_ARCHIVE_ERROR={last_error}", flush=True)
 
-            chain = verify_chain(SNAPSHOT_CHAIN)
-            backup_chain = verify_chain(BACKUP_MANIFEST)
-            health = {
-                "version": "PAPER_EVIDENCE_ARCHIVE_V1",
-                "heartbeat_at": utc_now(),
-                "heartbeat_epoch": time.time(),
-                "chain_ok": bool(chain.get("ok") and backup_chain.get("ok")),
-                "snapshot_records": chain.get("records"),
-                "last_snapshot_hash": chain.get("head") if chain.get("records") else None,
-                "backup_manifest_records": backup_chain.get("records"),
-                "last_backup_sha256": (last_backup or {}).get("sha256"),
-                "last_backup_file": (last_backup or {}).get("backup_file"),
-                "last_backup_quick_check": (last_backup or {}).get("sqlite_quick_check"),
-                "last_error": last_error,
-                "paper_database_mutated": False,
-                "strategy_parameters_mutated": False,
-            }
-            atomic_json(HEALTH_PATH, health)
+            try:
+                chain = verify_chain(SNAPSHOT_CHAIN)
+                backup_chain = verify_chain(BACKUP_MANIFEST)
+                health = {
+                    "version": "PAPER_EVIDENCE_ARCHIVE_V1",
+                    "heartbeat_at": utc_now(),
+                    "heartbeat_epoch": time.time(),
+                    "chain_ok": bool(chain.get("ok") and backup_chain.get("ok")),
+                    "snapshot_records": chain.get("records"),
+                    "last_snapshot_hash": chain.get("head") if chain.get("records") else None,
+                    "backup_manifest_records": backup_chain.get("records"),
+                    "last_backup_sha256": (last_backup or {}).get("sha256"),
+                    "last_backup_file": (last_backup or {}).get("backup_file"),
+                    "last_backup_quick_check": (last_backup or {}).get("sqlite_quick_check"),
+                    "last_error": last_error,
+                    "paper_database_mutated": False,
+                    "strategy_parameters_mutated": False,
+                }
+                atomic_json(HEALTH_PATH, health)
+            except Exception as health_exc:
+                print(f"SLOW_EVIDENCE_HEALTH_WRITE_ERROR={type(health_exc).__name__}: {health_exc}", flush=True)
             await asyncio.sleep(POLL_SECONDS)
 
 
