@@ -1,0 +1,2 @@
+source_commit=83c7760660ba2a9633f572b5661b61e8feda6e1c
+purpose=first-trade-postmortem-and-evidence-gate-diagnostics
