@@ -2,13 +2,20 @@ from __future__ import annotations
 import asyncio, json, os, time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 import httpx
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, HTMLResponse
 import slow_engine_v2 as eng
 import slow_replay_v1 as replay
 from slow_store_v3 import Store
-from slow_evidence_v1 import evidence_summary, latest_closed_trade_review, signal_reviews
+from slow_evidence_v1 import (
+    closed_trade_reviews,
+    evidence_summary,
+    latest_closed_trade_review,
+    scientific_readiness,
+    signal_reviews,
+)
 
 SYMBOLS=("BTCUSDT","ETHUSDT")
 INST={"BTCUSDT":"BTC-USDT-SWAP","ETHUSDT":"ETH-USDT-SWAP"}
@@ -27,6 +34,8 @@ DURABLE_STORAGE=bool(DATABASE_URL) or (not DATABASE_URL and os.path.abspath(DB_P
 RECENT_1M_SAFE_BARS=280
 HISTORY_PAGE_LIMIT=100
 HISTORY_PAGE_SLEEP=.11
+ARCHIVE_HEALTH_PATH=os.getenv("MRC_EVIDENCE_ARCHIVE_HEALTH","/data/evidence/archive_health.json")
+ARCHIVE_MAX_STALE_SECONDS=max(600,int(os.getenv("MRC_EVIDENCE_ARCHIVE_MAX_STALE_SECONDS","900")))
 
 def iso(ms=None):
     if ms is None:return datetime.now(timezone.utc).isoformat()
@@ -46,6 +55,18 @@ def read_evidence():return evidence_summary(db,SYMBOLS,eng.HOUR)
 
 def read_latest_closed_trade_review():return latest_closed_trade_review(db,COST_SCENARIOS)
 def read_signal_reviews():return signal_reviews(db,100)
+def read_closed_trade_reviews():return closed_trade_reviews(db,COST_SCENARIOS,200)
+def read_scientific_readiness():return scientific_readiness(db,SYMBOLS,eng.HOUR)
+def read_archive_health():
+    try:
+        body=json.loads(Path(ARCHIVE_HEALTH_PATH).read_text(encoding="utf-8"))
+        heartbeat=float(body.get("heartbeat_epoch") or 0);age=max(0.0,time.time()-heartbeat)
+        body["heartbeat_age_s"]=round(age,1);body["fresh"]=age<=ARCHIVE_MAX_STALE_SECONDS
+        body["ok"]=bool(body.get("chain_ok") and body.get("last_snapshot_hash") and body.get("last_backup_sha256") and body["fresh"] and not body.get("last_error"))
+        body["read_only_status_view"]=True
+        return body
+    except Exception as exc:
+        return {"ok":False,"fresh":False,"read_only_status_view":True,"error":f"{type(exc).__name__}: {exc}"}
 
 class OKX:
     def __init__(self):self.h=httpx.AsyncClient(timeout=12,headers={"User-Agent":"MRC-Slow-Staging/4.7"})
@@ -97,7 +118,7 @@ class OKX:
 
 STATE={
     "started_at":iso(),"heartbeat":0.0,"symbols":{},"last_error":None,"strategy":eng.STRATEGY,
-    "mode":"PAPER_STAGING","version":"slow-staging-v4.8-observability","release_sha":RELEASE_SHA,"coverage_gap":None,
+    "mode":"PAPER_STAGING","version":"slow-staging-v4.9-evidence-preservation","release_sha":RELEASE_SHA,"coverage_gap":None,
     "storage":{"backend":db.backend,"durable":DURABLE_STORAGE,"sqlite_path":DB_PATH if db.backend=="sqlite" else None},
     "replay":{"max_hold_h":eng.MAX_HOLD_H,"history_page_limit":HISTORY_PAGE_LIMIT,"last":None},
     "cost_policy":{"paper_baseline_bps":COST*10000.0,"audit_scenarios_bps":{k:v*10000.0 for k,v in COST_SCENARIOS.items()},
@@ -186,7 +207,7 @@ async def life(app):
     global TASK
     TASK=asyncio.create_task(loop());yield;TASK.cancel();db.close_conn()
 
-app=FastAPI(title="MRC Slow Trend Staging",version="4.8",lifespan=life)
+app=FastAPI(title="MRC Slow Trend Staging",version="4.9",lifespan=life)
 def checks():return {s:bool(STATE["symbols"].get(s,{}).get("context",{}).get("ready") and not STATE["symbols"].get(s,{}).get("error")) for s in SYMBOLS}
 @app.get("/healthz")
 async def health():
@@ -215,6 +236,7 @@ async def api_audit():
         "replay":STATE["replay"],"risk_controls":STATE["risk_controls"],"cost_policy":STATE["cost_policy"],
         "prospective":db.audit_summary(COST,START_EQUITY,now_ms),"cost_sensitivity":db.cost_sensitivity(COST_SCENARIOS,START_EQUITY),
         "evidence_quality":read_evidence(),"latest_closed_trade_review":read_latest_closed_trade_review(),
+        "scientific_readiness":read_scientific_readiness(),"archive_health":read_archive_health(),
         "recent_decisions":db.recent_decisions(20),"recent_trades":db.recent(20)}
 @app.get("/api/evidence")
 async def api_evidence():
@@ -225,6 +247,16 @@ async def api_latest_closed_trade_review():
 @app.get("/api/signal-reviews")
 async def api_signal_reviews():
     return {"strategy":eng.STRATEGY,"mode":"PAPER_STAGING","release_sha":RELEASE_SHA,"signal_reviews":read_signal_reviews()}
+@app.get("/api/closed-trade-reviews")
+async def api_closed_trade_reviews():
+    return {"strategy":eng.STRATEGY,"mode":"PAPER_STAGING","release_sha":RELEASE_SHA,"closed_trade_reviews":read_closed_trade_reviews()}
+@app.get("/api/scientific-readiness")
+async def api_scientific_readiness():
+    return {"strategy":eng.STRATEGY,"mode":"PAPER_STAGING","release_sha":RELEASE_SHA,"scientific_readiness":read_scientific_readiness()}
+@app.get("/api/archive-health")
+async def api_archive_health():
+    health=read_archive_health()
+    return JSONResponse({"strategy":eng.STRATEGY,"mode":"PAPER_STAGING","release_sha":RELEASE_SHA,"archive_health":health},status_code=200 if health.get("ok") else 503)
 @app.get("/api/cost-sensitivity")
 async def api_cost_sensitivity():
     return {"strategy":eng.STRATEGY,"mode":"PAPER_STAGING","release_sha":RELEASE_SHA,"cost_policy":STATE["cost_policy"],
@@ -232,5 +264,5 @@ async def api_cost_sensitivity():
 @app.get("/",response_class=HTMLResponse)
 async def root():
     return """<html><body style='background:#071019;color:#eaf2f8;font-family:system-ui;padding:28px'><h1>MRC Slow Trend — PAPER AUDIT</h1>
-    <p>4H EMA20/50 + 1H Donchian20 + ATR14 · PAPER ONLY</p><p><a style='color:#70c7ff' href='/api/state'>State</a> · <a style='color:#70c7ff' href='/api/audit'>Audit</a> · <a style='color:#70c7ff' href='/api/evidence'>Evidence</a> · <a style='color:#70c7ff' href='/api/latest-closed-trade-review'>Latest Trade Review</a> · <a style='color:#70c7ff' href='/api/signal-reviews'>Signal Reviews</a> · <a style='color:#70c7ff' href='/api/cost-sensitivity'>Costs</a> · <a style='color:#70c7ff' href='/readyz'>Readiness</a></p>
+    <p>4H EMA20/50 + 1H Donchian20 + ATR14 · PAPER ONLY</p><p><a style='color:#70c7ff' href='/api/state'>State</a> · <a style='color:#70c7ff' href='/api/audit'>Audit</a> · <a style='color:#70c7ff' href='/api/evidence'>Evidence</a> · <a style='color:#70c7ff' href='/api/latest-closed-trade-review'>Latest Trade Review</a> · <a style='color:#70c7ff' href='/api/closed-trade-reviews'>All Trade Reviews</a> · <a style='color:#70c7ff' href='/api/signal-reviews'>Signal Reviews</a> · <a style='color:#70c7ff' href='/api/scientific-readiness'>Scientific Readiness</a> · <a style='color:#70c7ff' href='/api/archive-health'>Archive Health</a> · <a style='color:#70c7ff' href='/api/cost-sensitivity'>Costs</a> · <a style='color:#70c7ff' href='/readyz'>Readiness</a></p>
     <div id='x'>loading…</div><script>async function g(){let r=await fetch('/api/audit'),x=await r.json();document.querySelector('#x').innerHTML='<pre>'+JSON.stringify(x,null,2)+'</pre>'};g();setInterval(g,10000)</script></body></html>"""

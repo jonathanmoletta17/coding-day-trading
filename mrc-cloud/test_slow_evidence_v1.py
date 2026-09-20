@@ -2,7 +2,13 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from slow_evidence_v1 import evidence_summary, latest_closed_trade_review, signal_reviews
+from slow_evidence_v1 import (
+    closed_trade_reviews,
+    evidence_summary,
+    latest_closed_trade_review,
+    scientific_readiness,
+    signal_reviews,
+)
 from slow_store_v3 import Store
 
 HOUR = 3_600_000
@@ -217,6 +223,81 @@ def test_signal_reviews_exposes_blocked_candidate_without_mutation():
         db.close_conn()
 
 
+def test_closed_trade_reviews_preserves_complete_lineage_read_only():
+    with TemporaryDirectory() as td:
+        db = Store(str(Path(td) / "evidence.sqlite3"))
+        signal_ms = 1_800_000_000_000
+        payload = {"symbol": "ETHUSDT", "signal_id": "eth-1", "side": "LONG", "signal_ms": signal_ms}
+        db._exec(
+            "INSERT INTO signals(signal_id,symbol,side,decision,signal_ms,payload,created_at) VALUES(?,?,?,?,?,?,?)",
+            ("eth-1", "ETHUSDT", "LONG", "LONG", signal_ms, json.dumps(payload), "2026-09-17T00:00:01+00:00"),
+        )
+        db.record_decision(
+            STRATEGY, "ETHUSDT", signal_ms, "2026-09-17T00:00:01+00:00",
+            ctx(state="EXECUTABLE", trend="UP", breakout="LONG"), None, action_override="PAPER_OPEN",
+        )
+        entry, exit_px, qty, risk = 100.0, 98.5, 2.0, 25.0
+        gross = (exit_px - entry) * qty
+        cost = (entry + exit_px) * qty * (0.0006 / 2)
+        pnl = gross - cost
+        db._exec(
+            "INSERT INTO trades(trade_id,signal_id,symbol,side,entry,stop,target,qty,risk,opened_ms,last_check_ms,closed_ms,exit,outcome,pnl,r_net) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("slow_eth-1", "eth-1", "ETHUSDT", "LONG", entry, 98.5, 103.0, qty, risk,
+             signal_ms + 1000, signal_ms + HOUR, signal_ms + HOUR, exit_px, "STOP", pnl, pnl / risk),
+        )
+        db._commit()
+        before = counts(db)
+        out = closed_trade_reviews(db, COSTS)
+        after = counts(db)
+        assert before == after
+        assert out["read_only"] is True
+        assert out["count"] == 1
+        assert out["all_link_integrity_pass"] is True
+        assert out["items"][0]["trade"]["trade_id"] == "slow_eth-1"
+        assert out["interpretation"]["real_money_promotion_authorized"] is False
+        db.close_conn()
+
+
+def test_scientific_readiness_is_precommitted_and_never_auto_promotes():
+    with TemporaryDirectory() as td:
+        db = Store(str(Path(td) / "evidence.sqlite3"))
+        base = 1_800_000_000_000
+        for i in range(721):
+            close_ms = base + i * HOUR
+            for symbol in ("BTCUSDT", "ETHUSDT"):
+                db.record_decision(STRATEGY, symbol, close_ms, "2026-09-17T00:00:00+00:00", ctx(), None)
+        for i in range(100):
+            symbol = "BTCUSDT" if i % 2 == 0 else "ETHUSDT"
+            signal_id = f"sig-{i}"
+            signal_ms = base + i * HOUR
+            db._exec(
+                "INSERT INTO signals(signal_id,symbol,side,decision,signal_ms,payload,created_at) VALUES(?,?,?,?,?,?,?)",
+                (signal_id, symbol, "LONG", "LONG", signal_ms, json.dumps({"signal_id": signal_id, "symbol": symbol}), "2026-09-17T00:00:01+00:00"),
+            )
+            db._exec(
+                "INSERT INTO trades(trade_id,signal_id,symbol,side,entry,stop,target,qty,risk,opened_ms,last_check_ms,closed_ms,exit,outcome,pnl,r_net) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (f"trade-{i}", signal_id, symbol, "LONG", 100.0, 98.5, 103.0, 1.0, 25.0,
+                 signal_ms + 1000, signal_ms + HOUR, signal_ms + HOUR, 102.5, "TARGET", 2.5, 0.1),
+            )
+        db._commit()
+        before = counts(db)
+        out = scientific_readiness(db, ("BTCUSDT", "ETHUSDT"), HOUR)
+        after = counts(db)
+        assert before == after
+        assert out["read_only"] is True
+        assert out["precommitted"] is True
+        assert out["evidence_floor_met"] is True
+        assert out["status"] == "ELIGIBLE_FOR_HUMAN_REVIEW"
+        assert out["automatic_promotion_supported"] is False
+        assert out["real_money_allowed"] is False
+        assert out["metrics"]["per_symbol"]["BTCUSDT"]["closed_trades"] == 50
+        assert out["metrics"]["bootstrap"]["lower_95_R"] > 0
+        assert all(out["checks"].values())
+        db.close_conn()
+
+
 def run_all():
     tests = [
         test_empty_is_valid_read_only,
@@ -227,6 +308,8 @@ def run_all():
         test_latest_closed_trade_review_reports_unavailable_without_closed_trade,
         test_latest_closed_trade_review_links_signal_decision_and_reprices_costs,
         test_signal_reviews_exposes_blocked_candidate_without_mutation,
+        test_closed_trade_reviews_preserves_complete_lineage_read_only,
+        test_scientific_readiness_is_precommitted_and_never_auto_promotes,
     ]
     for fn in tests:
         fn()

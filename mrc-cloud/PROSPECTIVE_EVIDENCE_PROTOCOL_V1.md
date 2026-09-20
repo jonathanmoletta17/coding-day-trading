@@ -49,6 +49,8 @@ The external evidence gate is read-only and recomputes from this durable source 
 
 A restart of the evidence-gate service must not erase or reset prospective PAPER evidence.
 
+The PAPER service also maintains a tamper-evident evidence chain and verified SQLite backup set on the mounted volume. These are recovery and audit controls, not an alternate economic source of truth. The full design and its same-volume limitation are documented in `PAPER_EVIDENCE_PRESERVATION_V1.md`.
+
 ## 4. Every decision counts as evidence
 
 The forward corpus includes more than trades.
@@ -142,6 +144,21 @@ These labels exist only to make the amount of observed data explicit.
 They are **not** statistical guarantees, approval thresholds, position-sizing rules or automatic promotion criteria.
 
 No sample count automatically unlocks R0.
+
+## 8.1 Precommitted scientific floor
+
+Before the corpus can be labelled eligible for a human research review, all precommitted `PAPER_SCIENTIFIC_GATE_V1` conditions must pass:
+
+- at least 100 closed PAPER trades and 200 decision events;
+- at least 30 observed days;
+- positive net expectancy;
+- moving-block bootstrap 95% lower bound at or above zero;
+- profit factor at least 1.10;
+- maximum drawdown no greater than 10R;
+- at least 30 closed trades and positive expectancy for each of BTCUSDT and ETHUSDT;
+- clean corpus integrity.
+
+This floor is deliberately fixed before a material sample accumulates. Passing it means only `ELIGIBLE_FOR_HUMAN_REVIEW`; it does not authorize LIVE, automatic promotion, or V1 parameter changes.
 
 ## 9. No prospective overfitting
 
